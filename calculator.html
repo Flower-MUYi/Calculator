@@ -337,14 +337,36 @@
             if (output.plotData && output.plotData.points && output.plotData.points.length) grapher.autoFit();
         }
 
+        // 取当前公式的 MathJSON：依次尝试 expression.json、getValue('math-json')、用 CE 解析 LaTeX
+        const isNothing = (a) => a === null || a === undefined || a === 'Nothing' || (Array.isArray(a) && a[0] === 'Nothing');
+        function getCurrentAST(latex) {
+            let ast = null;
+            try { if (mathInput.expression) ast = mathInput.expression.json; } catch (e) { }
+            if (isNothing(ast)) {
+                try {
+                    let j = mathInput.getValue('math-json');
+                    if (typeof j === 'string') j = JSON.parse(j);
+                    ast = j;
+                } catch (e) { }
+            }
+            if (isNothing(ast)) {
+                try { ast = ce.parse(latex).json; } catch (e) { }
+            }
+            return isNothing(ast) ? null : ast;
+        }
+
         // ---------- 计算 ----------
         let ce = null;
         function runCalculation() {
             if (!ce) { showProblem('计算引擎还没有加载完成，请稍候再试。'); return; }
-            const currentAST = mathInput.expression ? mathInput.expression.json : null;
-            const isEmpty = !currentAST || currentAST === 'Nothing' || (Array.isArray(currentAST) && currentAST[0] === 'Nothing');
-            if (isEmpty) {
+            const latex = (mathInput.getValue ? mathInput.getValue('latex') : mathInput.value) || '';
+            if (!latex.trim()) {
                 showProblem('还没有输入公式。在上方输入框键入，或点一个例子。');
+                return;
+            }
+            const currentAST = getCurrentAST(latex);
+            if (currentAST === null || currentAST === undefined) {
+                showProblem('公式无法解析，请检查括号和运算符是否完整。');
                 return;
             }
             calcBtn.disabled = true;
