@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微积分推演台</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&family=Hanken+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <!-- KaTeX 数学排版引擎 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+
+    <style>
+        :root {
+            --paper: #eef2ee;
+            --grid: #d8e0d9;
+            --sheet: #fbfcfa;
+            --rule: #c7d1c9;
+            --ink: #18233a;
+            --ink-soft: #56637b;
+            --accent: #2447d4;
+            --accent-deep: #1a35a8;
+            --marker: #ffe66b;
+            --well: #0f172a;
+            --warn: #b0432d;
+            --serif: "Newsreader", "Noto Serif SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+            --sans: "Hanken Grotesk", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        html { -webkit-text-size-adjust: 100%; }
+
+        body {
+            margin: 0;
+            color: var(--ink);
+            font-family: var(--sans);
+            font-size: 16px;
+            line-height: 1.6;
+            background-color: var(--paper);
+            /* 方格稿纸：细格 24px，粗格 120px */
+            background-image:
+                linear-gradient(var(--grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+            background-size: 24px 24px;
+            background-position: -1px -1px;
+        }
+
+        :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+        .page { max-width: 1240px; margin: 0 auto; padding: 36px 24px 72px; }
+
+        /* ---------- 页头 ---------- */
+        .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
+        .masthead h1 { margin: 0; font-family: var(--serif); font-weight: 600; font-size: clamp(2rem, 4vw, 2.9rem); line-height: 1.1; letter-spacing: 0.01em; }
+        .masthead p { margin: 8px 0 0; color: var(--ink-soft); max-width: 36em; }
+        .status { display: inline-flex; align-items: center; gap: 8px; font-size: 0.875rem; color: var(--ink-soft); background: var(--sheet); border: 1px solid var(--rule); padding: 6px 12px; border-radius: 999px; }
+        .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #d19a1f; }
+        .status[data-state="ready"]::before { background: #2e9e5b; }
+        .status[data-state="error"]::before { background: var(--warn); }
+
+        /* ---------- 版面 ---------- */
+        .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; align-items: start; }
+        @media (min-width: 1040px) {
+            .layout { grid-template-columns: minmax(440px, 560px) minmax(0, 1fr); gap: 36px; }
+            .stage { position: sticky; top: 20px; }
+        }
+        .workbook { display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+
+        .sheet { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 20px 22px; }
+        .sheet h2 { margin: 0 0 12px; font-family: var(--serif); font-weight: 600; font-size: 1.25rem; }
+
+        /* ---------- 输入稿纸：左侧蓝色页边线 ---------- */
+        .entry { border-left: 4px solid var(--accent); padding-top: 22px; box-shadow: 0 1px 0 rgba(24, 35, 58, .04); }
+
+        math-field#myMathInput {
+            display: block; width: 100%; min-height: 76px; padding: 12px 14px;
+            font-size: 1.7rem; background: #fff; color: var(--ink);
+            border: 1.5px solid var(--rule); border-radius: 4px; outline: none;
+            --primary: var(--accent); --caret-color: var(--accent);
+            transition: border-color .15s, box-shadow .15s;
+        }
+        math-field#myMathInput:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(36, 71, 212, .16); }
+
+        .actions { display: flex; align-items: center; gap: 14px; margin-top: 14px; flex-wrap: wrap; }
+        .btn-run {
+            font: 600 1rem var(--sans); color: #fff; background: var(--accent); border: 0; border-radius: 4px;
+            padding: 11px 26px; min-height: 44px; cursor: pointer; transition: background .15s, transform .1s;
+        }
+        .btn-run:hover { background: var(--accent-deep); }
+        .btn-run:active { transform: translateY(1px); }
+        .btn-run[disabled] { opacity: .6; cursor: progress; }
+        .hint { color: var(--ink-soft); font-size: 0.875rem; }
+        .hint kbd { font: 500 0.8rem var(--sans); background: #fff; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 3px; padding: 1px 6px; }
+
+        .examples { margin-top: 18px; padding-top: 16px; border-top: 1px dashed var(--rule); }
+        .examples > span { display: block; font-size: 0.875rem; color: var(--ink-soft); margin-bottom: 8px; }
+        .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .chip {
+            font: 500 0.9rem var(--sans); color: var(--ink); background: #fff; border: 1px solid var(--rule);
+            border-radius: 4px; padding: 6px 12px; min-height: 36px; cursor: pointer; transition: border-color .15s, background .15s;
+        }
+        .chip:hover { border-color: var(--accent); background: #f3f6ff; }
+        .chip .katex { font-size: 1em; }
+
+        /* ---------- 结果：荧光笔 ---------- */
+        .answer-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+        .meta { font-size: 0.8125rem; color: var(--ink-soft); }
+        .btn-quiet { font: 500 0.875rem var(--sans); color: var(--accent); background: none; border: 0; padding: 6px 4px; cursor: pointer; min-height: 32px; }
+        .btn-quiet:hover { text-decoration: underline; }
+        .btn-quiet[hidden] { display: none; }
+        #resultOutput { min-height: 64px; display: flex; align-items: center; overflow-x: auto; padding: 8px 2px; font-size: 1.55rem; }
+        #resultOutput .hl { display: inline-block; max-width: 100%; padding: 4px 10px; background: linear-gradient(transparent 52%, var(--marker) 52%, var(--marker) 92%, transparent 92%); }
+        .empty { color: var(--ink-soft); font-size: 0.95rem; }
+        .problem { color: var(--warn); font-size: 0.95rem; }
+
+        /* ---------- 推导步骤：带编号的竖线 ---------- */
+        .derivation h2 { margin-left: 2px; }
+        .steps { list-style: none; margin: 0; padding: 0; position: relative; }
+        .step { position: relative; padding: 0 0 20px 52px; }
+        .step::before { content: ""; position: absolute; left: 17px; top: 36px; bottom: 0; width: 2px; background: var(--rule); }
+        .step:last-child::before { display: none; }
+        .step-no {
+            position: absolute; left: 0; top: 0; width: 36px; height: 36px; border-radius: 50%;
+            display: grid; place-items: center; font: 600 0.95rem var(--sans); color: var(--accent);
+            background: var(--sheet); border: 2px solid var(--accent);
+        }
+        .step-title { font-family: var(--serif); font-size: 1.08rem; font-weight: 500; line-height: 1.4; padding-top: 5px; margin-bottom: 8px; }
+        .step-title .katex { font-size: 1em; }
+        .step-math { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 10px 14px; overflow-x: auto; font-size: 1.15rem; }
+        .step.final .step-no { background: var(--accent); color: #fff; }
+        .step.reveal { animation: settle .38s ease both; animation-delay: calc(var(--i) * 55ms); }
+        @keyframes settle { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+        /* ---------- 图像观测屏 ---------- */
+        .stage .sheet { padding: 16px; }
+        .stage-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+        .stage-head h2 { margin: 0; }
+        .stage-head .hint { text-align: right; }
+        #graph-legend .katex { font-size: 1.05em; color: #f8fafc; }
+        #graph-tooltip .katex { font-size: 1.15em; color: #38bdf8; }
+        #graph-tooltip .katex-html, #graph-legend .katex-html { white-space: nowrap; }
+        #graphContainer .graph-wrapper { height: min(60vh, 520px) !important; min-height: 340px; border-radius: 4px !important; border-color: #1e293b !important; }
+
+        /* ---------- 调试 ---------- */
+        details.debug { margin-top: 4px; border: 1px dashed var(--rule); border-radius: 4px; background: rgba(251, 252, 250, .7); }
+        details.debug summary { cursor: pointer; padding: 10px 14px; font-size: 0.875rem; color: var(--ink-soft); list-style: none; display: flex; justify-content: space-between; }
+        details.debug summary::-webkit-details-marker { display: none; }
+        details.debug summary::after { content: "展开"; }
+        details.debug[open] summary::after { content: "收起"; }
+        details.debug pre { margin: 0; padding: 12px 14px; max-height: 260px; overflow: auto; font: 0.8rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--ink); border-top: 1px dashed var(--rule); white-space: pre-wrap; word-break: break-word; }
+
+        .raw-math { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; }
+
+        @media (max-width: 560px) {
+            .page { padding: 24px 14px 56px; }
+            .sheet { padding: 16px; }
+            math-field#myMathInput { font-size: 1.4rem; }
+            .step { padding-left: 46px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .step.reveal { animation: none; }
+            * { transition: none !important; }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="page">
+        <header class="masthead">
+            <div>
+                <h1>微积分推演台</h1>
+                <p>输入一个公式，得到分步推导、最终结果和函数图像。支持求导、积分、极限、方程、不等式、微分方程与级数。</p>
+            </div>
+            <span class="status" id="engineStatus" data-state="loading" role="status">引擎加载中</span>
+        </header>
+
+        <div class="layout">
+            <main class="workbook">
+                <section class="sheet entry" aria-labelledby="entryTitle">
+                    <h2 id="entryTitle">输入公式</h2>
+                    <math-field id="myMathInput" aria-label="公式输入框"></math-field>
+
+                    <div class="actions">
+                        <button class="btn-run" id="calcBtn" type="button">开始计算</button>
+                        <span class="hint">或按 <kbd>Enter</kbd> 计算</span>
+                    </div>
+
+                    <div class="examples">
+                        <span>没有思路？从这些例子开始</span>
+                        <div class="chips" id="chips"></div>
+                    </div>
+                </section>
+
+                <section class="sheet" aria-labelledby="answerTitle" aria-live="polite">
+                    <div class="answer-head">
+                        <h2 id="answerTitle">结果</h2>
+                        <span>
+                            <span class="meta" id="timing"></span>
+                            <button class="btn-quiet" id="copyBtn" type="button" hidden>复制 LaTeX</button>
+                        </span>
+                    </div>
+                    <div id="resultOutput"><span class="empty">输入公式并点击“开始计算”，结果会显示在这里。</span></div>
+                </section>
+
+                <section class="derivation" aria-labelledby="stepsTitle">
+                    <h2 id="stepsTitle">推导步骤</h2>
+                    <ol class="steps" id="stepsContainer">
+                        <li class="empty" style="padding-left:2px">计算完成后，每一步推导会按顺序列在这里。</li>
+                    </ol>
+                </section>
+
+                <details class="debug">
+                    <summary><span>调试：公式的语法树 (MathJSON)</span></summary>
+                    <pre id="ASTOutput">加载中…</pre>
+                </details>
+            </main>
+
+            <aside class="stage" aria-labelledby="graphTitle">
+                <div class="sheet">
+                    <div class="stage-head">
+                        <h2 id="graphTitle">函数图像</h2>
+                        <span class="hint">拖动平移，滚轮缩放；点图例可隐藏曲线</span>
+                    </div>
+                    <div id="graphContainer"></div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script type="module">
+        import { MathfieldElement } from 'https://unpkg.com/mathlive?module';
+        import { ComputeEngine } from 'https://unpkg.com/@cortex-js/compute-engine?module';
+        import { routeCalculation } from './router.js';
+        import { InteractiveGrapher } from './grapher.js';
+
+        const $ = (id) => document.getElementById(id);
+        const mathInput = $('myMathInput');
+        const ASTOutput = $('ASTOutput');
+        const calcBtn = $('calcBtn');
+        const resultOutput = $('resultOutput');
+        const stepsContainer = $('stepsContainer');
+        const statusEl = $('engineStatus');
+        const timingEl = $('timing');
+        const copyBtn = $('copyBtn');
+        const grapher = new InteractiveGrapher('graphContainer');
+
+        let lastResultLatex = '';
+
+        const EXAMPLES = [
+            { label: '求导', latex: '\\frac{d}{dx}\\left(x^2\\sin x\\right)' },
+            { label: '不定积分', latex: '\\int \\frac{1}{x^2-1}\\,dx' },
+            { label: '定积分', latex: '\\int_0^{\\infty} e^{-x^2}\\,dx' },
+            { label: '极限', latex: '\\lim_{x\\to0}\\frac{\\sin x}{x}' },
+            { label: '方程', latex: 'x^3-6x^2+11x-6=0' },
+            { label: '不等式', latex: '\\frac{x-1}{x-3}\\le0' },
+            { label: '圆', latex: 'x^2+y^2=4' },
+            { label: '微分方程', latex: "y'+2y=x" },
+            { label: '二阶方程', latex: "y''+y=0" },
+            { label: '级数', latex: '\\sum_{n=1}^{\\infty}\\frac{1}{n^2}' }
+        ];
+
+        // ---------- KaTeX 渲染 ----------
+        function katexHTML(latex, display = false) {
+            if (window.katex) {
+                try { return window.katex.renderToString(latex, { displayMode: display, throwOnError: false, strict: false }); }
+                catch (e) { /* 落到下面的纯文本 */ }
+            }
+            return `<span class="raw-math">${escapeHtml(latex)}</span>`;
+        }
+        function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+        // 标题里用 $...$ 包裹的片段交给 KaTeX，其余按文本显示
+        function titleHTML(title) {
+            return String(title).split('$').map((seg, i) => i % 2 === 1 ? katexHTML(seg) : escapeHtml(seg)).join('');
+        }
+
+        // ---------- 示例 ----------
+        const chips = $('chips');
+        EXAMPLES.forEach(ex => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chip';
+            b.title = ex.latex;
+            b.innerHTML = `${escapeHtml(ex.label)}　${katexHTML(ex.latex)}`;
+            b.addEventListener('click', () => {
+                mathInput.value = ex.latex;
+                updateAST();
+                runCalculation();
+                mathInput.focus();
+            });
+            chips.appendChild(b);
+        });
+        // KaTeX 是 defer 加载的，模块执行时通常已就绪；兜底再渲染一次
+        window.addEventListener('load', () => {
+            [...chips.children].forEach((b, i) => { b.innerHTML = `${escapeHtml(EXAMPLES[i].label)}　${katexHTML(EXAMPLES[i].latex)}`; });
+        });
+
+        // ---------- 渲染结果 ----------
+        function showProblem(msg) {
+            resultOutput.innerHTML = `<span class="problem">${escapeHtml(msg)}</span>`;
+            copyBtn.hidden = true;
+            lastResultLatex = '';
+        }
+
+        function renderOutput(output, ms) {
+            lastResultLatex = output.resultLatex || '';
+            if (lastResultLatex) {
+                resultOutput.innerHTML = `<span class="hl">${katexHTML(lastResultLatex, false)}</span>`;
+                copyBtn.hidden = false;
+            } else {
+                showProblem('没有得到结果。请检查公式是否完整。');
+            }
+            timingEl.textContent = `${ms < 1 ? '<1' : Math.round(ms)} ms`;
+
+            stepsContainer.innerHTML = '';
+            const steps = output.steps || [];
+            if (steps.length === 0) {
+                stepsContainer.innerHTML = '<li class="empty" style="padding-left:2px">这个表达式没有可展开的推导步骤。</li>';
+            }
+            steps.forEach((step, i) => {
+                const li = document.createElement('li');
+                li.className = 'step reveal' + (i === steps.length - 1 ? ' final' : '');
+                li.style.setProperty('--i', Math.min(i, 12));
+                li.innerHTML = `
+                    <span class="step-no" aria-hidden="true">${i + 1}</span>
+                    <div class="step-title">${titleHTML(step.title)}</div>
+                    <div class="step-math">${katexHTML(step.latex, true)}</div>`;
+                stepsContainer.appendChild(li);
+            });
+
+            grapher.setData(output.plotData || null);
+            if (output.plotData && output.plotData.points && output.plotData.points.length) grapher.autoFit();
+        }
+
+        // ---------- 计算 ----------
+        let ce = null;
+        function runCalculation() {
+            if (!ce) { showProblem('计算引擎还没有加载完成，请稍候再试。'); return; }
+            const currentAST = mathInput.expression ? mathInput.expression.json : null;
+            const isEmpty = !currentAST || currentAST === 'Nothing' || (Array.isArray(currentAST) && currentAST[0] === 'Nothing');
+            if (isEmpty) {
+                showProblem('还没有输入公式。在上方输入框键入，或点一个例子。');
+                return;
+            }
+            calcBtn.disabled = true;
+            calcBtn.textContent = '计算中…';
+            // 让按钮状态先绘制出来，再执行同步计算
+            setTimeout(() => {
+                const t0 = performance.now();
+                try {
+                    const output = routeCalculation(currentAST, ce);
+                    renderOutput(output, performance.now() - t0);
+                } catch (err) {
+                    console.error(err);
+                    showProblem(`计算失败：${err.message || '未知错误'}。试试换一种写法。`);
+                    grapher.setData(null);
+                } finally {
+                    calcBtn.disabled = false;
+                    calcBtn.textContent = '开始计算';
+                }
+            }, 20);
+        }
+
+        function updateAST() {
+            let mathJSON;
+            try {
+                mathJSON = mathInput.expression && mathInput.expression.json ? mathInput.expression.json : mathInput.getValue('math-json');
+                if (typeof mathJSON === 'string') { try { mathJSON = JSON.parse(mathJSON); } catch (e) { } }
+                ASTOutput.textContent = JSON.stringify(mathJSON, null, 2);
+            } catch (e) { ASTOutput.textContent = '（暂时无法解析当前输入）'; }
+        }
+
+        try {
+            ce = new ComputeEngine();
+            MathfieldElement.computeEngine = ce;
+            statusEl.dataset.state = 'ready';
+            statusEl.textContent = '引擎就绪';
+
+            mathInput.addEventListener('input', updateAST);
+            mathInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runCalculation(); }
+            });
+            setTimeout(updateAST, 300);
+            calcBtn.addEventListener('click', runCalculation);
+
+            copyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(lastResultLatex);
+                    copyBtn.textContent = '已复制';
+                } catch (e) {
+                    copyBtn.textContent = '复制失败';
+                }
+                setTimeout(() => { copyBtn.textContent = '复制 LaTeX'; }, 1400);
+            });
+        } catch (error) {
+            statusEl.dataset.state = 'error';
+            statusEl.textContent = '引擎加载失败';
+            ASTOutput.textContent = '脚本运行中断：\n' + error.message;
+            showProblem('计算引擎加载失败，请检查网络后刷新页面。');
+            grapher.setData(null);
+        }
+    </script>
+</body>
+
+</html>
