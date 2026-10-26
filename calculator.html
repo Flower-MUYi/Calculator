@@ -265,15 +265,38 @@
         ];
 
         // ---------- KaTeX 渲染 ----------
-        function katexHTML(latex, display = false) {
-            if (window.katex) {
-                try { return window.katex.renderToString(latex, { displayMode: display, throwOnError: false, strict: false }); }
-                catch (e) { /* 落到下面的纯文本 */ }
-            }
-            return `<span class="raw-math">${escapeHtml(latex)}</span>`;
+        // CE / MathLive 生成的 LaTeX 含有 KaTeX 不认识的专用写法，这里补成等价宏
+        const MACROS = {
+            '\\exponentialE': '\\mathrm{e}', '\\differentialD': '\\mathrm{d}', '\\imaginaryI': '\\mathrm{i}',
+            '\\imaginaryJ': '\\mathrm{j}', '\\mleft': '\\left', '\\mright': '\\right',
+            '\\placeholder': '\\square', '\\operatorname*': '\\operatorname', '\\Nothing': '\\varnothing'
+        };
+        if (window.katex && !window.katex.__patched) {
+            const rs = window.katex.renderToString.bind(window.katex), rd = window.katex.render.bind(window.katex);
+            const withMacros = (o = {}) => ({ strict: false, ...o, macros: { ...MACROS, ...(o.macros || {}) } });
+            window.katex.renderToString = (t, o) => rs(t, withMacros(o));
+            window.katex.render = (t, el, o) => rd(t, el, withMacros(o));
+            window.katex.__patched = true;
         }
         function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-
+        function tryKatex(latex, display = false) {
+            if (!window.katex) return null;
+            try { return window.katex.renderToString(latex, { displayMode: display, throwOnError: true }); }
+            catch (e) { return null; }
+        }
+        function katexHTML(latex, display = false) {
+            return tryKatex(latex, display) || `<span class="raw-math">${escapeHtml(latex)}</span>`;
+        }
+        // 把公式放进容器：优先 KaTeX；失败则用 MathLive 只读公式组件兜底，保证排版美观
+        function setMath(el, latex, display = false) {
+            const html = tryKatex(latex, display);
+            if (html) { el.innerHTML = html; return; }
+            const mf = document.createElement('math-field');
+            mf.setAttribute('readonly', ''); mf.setAttribute('read-only', '');
+            mf.style.cssText = 'display:block;background:transparent;border:0;outline:0;padding:0;min-height:0;font-size:inherit;color:inherit;';
+            el.replaceChildren(mf);
+            try { mf.value = latex; } catch (e) { el.textContent = latex; }
+        }
         // 标题里用 $...$ 包裹的片段交给 KaTeX，其余按文本显示
         function titleHTML(title) {
             return String(title).split('$').map((seg, i) => i % 2 === 1 ? katexHTML(seg) : escapeHtml(seg)).join('');
@@ -310,7 +333,10 @@
         function renderOutput(output, ms) {
             lastResultLatex = output.resultLatex || '';
             if (lastResultLatex) {
-                resultOutput.innerHTML = `<span class="hl">${katexHTML(lastResultLatex, false)}</span>`;
+                const hl = document.createElement('span');
+                hl.className = 'hl';
+                setMath(hl, lastResultLatex, false);
+                resultOutput.replaceChildren(hl);
                 copyBtn.hidden = false;
             } else {
                 showProblem('没有得到结果。请检查公式是否完整。');
@@ -329,7 +355,8 @@
                 li.innerHTML = `
                     <span class="step-no" aria-hidden="true">${i + 1}</span>
                     <div class="step-title">${titleHTML(step.title)}</div>
-                    <div class="step-math">${katexHTML(step.latex, true)}</div>`;
+                    <div class="step-math"></div>`;
+                setMath(li.querySelector('.step-math'), step.latex, true);
                 stepsContainer.appendChild(li);
             });
 
@@ -388,12 +415,22 @@
             }, 20);
         }
 
+        // 紧凑缩进：短的子树放在一行，长的才展开
+        function prettyJSON(node, indent = 0) {
+            const flat = JSON.stringify(node);
+            if (flat === undefined) return 'null';
+            if (flat.length <= 64 || typeof node !== 'object' || node === null) return flat;
+            const pad = '  '.repeat(indent + 1), end = '  '.repeat(indent);
+            if (Array.isArray(node)) return '[\n' + node.map(n => pad + prettyJSON(n, indent + 1)).join(',\n') + '\n' + end + ']';
+            return '{\n' + Object.entries(node).map(([k, v]) => `${pad}${JSON.stringify(k)}: ${prettyJSON(v, indent + 1)}`).join(',\n') + '\n' + end + '}';
+        }
+
         function updateAST() {
-            let mathJSON;
             try {
-                mathJSON = mathInput.expression && mathInput.expression.json ? mathInput.expression.json : mathInput.getValue('math-json');
-                if (typeof mathJSON === 'string') { try { mathJSON = JSON.parse(mathJSON); } catch (e) { } }
-                ASTOutput.textContent = JSON.stringify(mathJSON, null, 2);
+                const latex = (mathInput.getValue ? mathInput.getValue('latex') : mathInput.value) || '';
+                if (!latex.trim()) { ASTOutput.textContent = '（输入公式后，这里会显示它的语法树）'; return; }
+                const ast = getCurrentAST(latex);
+                ASTOutput.textContent = ast === null ? '（暂时无法解析当前输入）' : prettyJSON(ast);
             } catch (e) { ASTOutput.textContent = '（暂时无法解析当前输入）'; }
         }
 
