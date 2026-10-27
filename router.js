@@ -10,8 +10,7 @@ import {
     solveFunctionDeclaration,
     solveGeneralAlgebra,
     solveODE,
-    solveSeries,
-    formatOutput
+    solveSeries
 } from './solvers.js';
 import { freeSymbols } from './mathcore.js';
 
@@ -22,6 +21,9 @@ function isNothing(val) {
 
 const INEQUALITIES = new Set(['Less', 'LessEqual', 'Greater', 'GreaterEqual']);
 const isEquation = (n) => Array.isArray(n) && n[0] === 'Equal';
+
+// 给结果打上题型标签，供页面显示
+const typed = (type, fn) => { const out = fn(); if (out && typeof out === 'object') out.type = type; return out; };
 
 // 递归检测 AST 是否包含导数记号 (y', f'(x), dy/dx, y'' 等)
 function hasDifferentialTerms(node) {
@@ -81,7 +83,7 @@ export function routeCalculation(ast, ce) {
         if (Array.isArray(ast) && ['Tuple', 'Sequence', 'List', 'System', 'Delimiter'].includes(ast[0])) {
             const items = ast.slice(1).filter(x => !isNothing(x));
             if (items.length >= 2 && items.every(isEquation) && !items.some(hasDifferentialTerms)) {
-                return solveEquationSystem({ equations: items }, ce);
+                return typed('方程组', () => solveEquationSystem({ equations: items }, ce));
             }
             if (items.length === 1) {
                 targetAst = items[0];
@@ -92,7 +94,7 @@ export function routeCalculation(ast, ce) {
         }
 
         if (!Array.isArray(targetAst)) {
-            return solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce);
+            return typed('化简求值', () => solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce));
         }
 
         const [operator, ...operands] = targetAst;
@@ -103,7 +105,7 @@ export function routeCalculation(ast, ce) {
                 const targetExpr = operands[0];
                 const variable = typeof operands[1] === 'string' ? operands[1] : 'x';
                 const order = typeof operands[2] === 'number' ? operands[2] : (typeof operands[1] === 'number' ? operands[1] : 1);
-                return solveDerivative({ targetExpr, variable, order, conditionExpr }, ce);
+                return typed('求导', () => solveDerivative({ targetExpr, variable, order, conditionExpr }, ce));
             }
 
             case 'Integrate': {
@@ -136,7 +138,7 @@ export function routeCalculation(ast, ce) {
                     upper = operands[2];
                 }
 
-                return solveIntegral({ targetExpr, variable, lower, upper, isDefinite, conditionExpr }, ce);
+                return typed((isDefinite ? '定积分' : '不定积分'), () => solveIntegral({ targetExpr, variable, lower, upper, isDefinite, conditionExpr }, ce));
             }
 
             case 'Limit': {
@@ -154,7 +156,7 @@ export function routeCalculation(ast, ce) {
                     if (typeof operands[2] === 'string' && operands[2].length === 1 && /[a-z]/i.test(operands[2])) { variable = operands[2]; dirNode = operands[3]; }
                 }
                 const { point, direction } = extractLimitPoint(pointNode, dirNode);
-                return solveLimit({ targetExpr, variable, targetValue: point, direction, conditionExpr }, ce);
+                return typed('极限', () => solveLimit({ targetExpr, variable, targetValue: point, direction, conditionExpr }, ce));
             }
 
             case 'Sum':
@@ -171,15 +173,15 @@ export function routeCalculation(ast, ce) {
                     if (!isNothing(operands[2])) lower = operands[2];
                     if (!isNothing(operands[3])) upper = operands[3];
                 }
-                return solveSeries({ kind: operator, body, variable, lower, upper }, ce);
+                return typed((operator === 'Product' ? '连乘' : '求和 / 级数'), () => solveSeries({ kind: operator, body, variable, lower, upper }, ce));
             }
 
             case 'Less':
             case 'LessEqual':
             case 'Greater':
             case 'GreaterEqual': {
-                if (operands.length === 2) return solveInequality({ lhs: operands[0], rhs: operands[1], rel: operator }, ce);
-                return solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce);
+                if (operands.length === 2) return typed('不等式', () => solveInequality({ lhs: operands[0], rhs: operands[1], rel: operator }, ce));
+                return typed('化简求值', () => solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce));
             }
 
             case 'Equal': {
@@ -187,7 +189,7 @@ export function routeCalculation(ast, ce) {
 
                 // 分支 1：常微分方程 (含 y', y'', f'(x), dy/dx)
                 if (hasDifferentialTerms(lhs) || hasDifferentialTerms(rhs)) {
-                    return solveODE({ lhs, rhs, conditionExpr }, ce);
+                    return typed('微分方程', () => solveODE({ lhs, rhs, conditionExpr }, ce));
                 }
 
                 const syms = [...freeSymbols(targetAst)];
@@ -196,35 +198,35 @@ export function routeCalculation(ast, ce) {
                 const isFuncLHS = lhs === 'y' ||
                     (Array.isArray(lhs) && (lhs[0] === 'f' || lhs[0] === 'g' || lhs[0] === 'Apply' || lhs[0] === 'Function'));
                 if (isFuncLHS && !freeSymbols(rhs).has('y')) {
-                    return solveFunctionDeclaration({ name: lhs, expr: rhs, conditionExpr }, ce);
+                    return typed('函数分析', () => solveFunctionDeclaration({ name: lhs, expr: rhs, conditionExpr }, ce));
                 }
 
                 // 分支 3：二元方程 → 平面曲线 (如 x^2 + y^2 = 4、x + 2y = 3)
                 if (syms.length === 2 && syms.includes('x') && syms.includes('y')) {
-                    return solveImplicitCurve({ lhs, rhs, vars: ['x', 'y'] }, ce);
+                    return typed('平面曲线', () => solveImplicitCurve({ lhs, rhs, vars: ['x', 'y'] }, ce));
                 }
 
                 // 分支 4：没有未知数 (如 2 + 2 = 4)
                 if (syms.length === 0) {
-                    return solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce);
+                    return typed('化简求值', () => solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce));
                 }
 
                 // 分支 5：一元方程求解
                 const variable = getEquationVariable(targetAst);
-                return solveEquation({ lhs, rhs, variable, conditionExpr }, ce);
+                return typed('方程', () => solveEquation({ lhs, rhs, variable, conditionExpr }, ce));
             }
 
             default:
-                return solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce);
+                return typed('化简求值', () => solveGeneralAlgebra({ targetExpr: targetAst, conditionExpr }, ce));
         }
     } catch (err) {
         console.error("Calculation router error:", err);
-        // 错误信息放进 \text{} 前去掉 LaTeX 控制字符，并统一走 formatOutput
-        const msg = String(err?.message || '未知错误').replace(/[\\{}_^#%&$~]/g, ' ').replace(/\s+/g, ' ').trim();
-        return formatOutput({
-            resultLatex: `\\text{计算出现异常：${msg}}`,
-            steps: [{ title: '推导异常中断', latex: `\\text{错误信息：${msg}}`, type: 'warn' }],
+        return {
+            resultLatex: `\\text{计算出现异常: } ${String(err.message || '未知错误').replace(/[\\{}_^#%&$~]/g, ' ')}`,
+            steps: [
+                { title: "推导异常中断", latex: `\\text{错误信息: } ${String(err.message || '格式无法解析').replace(/[\\{}_^#%&$~]/g, ' ')}` }
+            ],
             plotData: null
-        });
+        };
     }
 }
