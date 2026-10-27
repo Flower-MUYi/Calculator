@@ -1,6 +1,5 @@
 // solvers.js —— 现代全功能微积分、代数与微分方程分步推导引擎
 import * as MC from './mathcore.js';
-import { normalizeLatex, normalizeTitle, normalizeSteps, normalizeResult } from './normalize.js';
 
 /**
  * 求解线性代数方程组 (高斯主元消去法)
@@ -99,30 +98,95 @@ export function cleanMathLatex(latexStr) {
     str = str.replace(directPattern, (m, fn, arg, exp) => `\\${fn}^${exp.startsWith('{') ? exp : `{${exp}}`}${arg}`);
 
     // 清理多余符号和正负号重叠
-    str = str.replace(/\\left\(\s*\\right\)/g, '')
+    str = str.replace(/\+\s*-/g, '- ')
+             .replace(/-\s*-/g, '+ ')
+             .replace(/\\left\(\s*\\right\)/g, '')
              .replace(/(?<![0-9.])1(?=\\ln)/g, '')
              .replace(/(?<![0-9.])1(?=\\pi)/g, '');
 
-    return normalizeLatex(str);
+    return tidyLatex(str);
 }
 
 /**
- * 标题美化（保留旧接口）：交给 normalizeTitle 统一处理
+ * 统一整理 LaTeX 书写习惯：去掉 x^{1}、1·x、+0，负号提到分式前，规整空白
+ */
+export function tidyLatex(str) {
+    let t = str;
+    for (let i = 0; i < 2; i++) {
+        t = t
+            .replace(/\^\{1\}(?![0-9.])/g, '')
+            .replace(/(?<![0-9.\w\\{^_])1\s*(?:\\cdot\s*)?(?=(?:[a-zA-Z]\b|\\(?:sin|cos|tan|cot|sec|csc|ln|log|pi|exp|sqrt|frac|arctan|arcsin|arccos|mathrm)))/g, '')
+            .replace(/\\frac\{-([^{}]+)\}\{([^{}]+)\}/g, '-\\frac{$1}{$2}')
+            .replace(/\s*\+\s*0(?![0-9.\w])/g, '')
+            .replace(/^0\s*\+\s*/, '')
+            .replace(/\+\s*-/g, '- ')
+            .replace(/-\s*-/g, '+ ')
+            .replace(/\(\s*\)/g, '');
+    }
+    return t.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/** 结果若含 π、根式、对数、分数等精确形式，附上近似小数，便于对照 */
+export function withApprox(latex, value) {
+    if (typeof value !== 'number' || !isFinite(value) || /\\approx|\\text|\\infty/.test(latex)) return latex;
+    if (Math.abs(value - Math.round(value)) < 1e-9) return latex;
+    if (!/\\(?:pi|sqrt|ln|frac)|(?:^|[^a-zA-Z\\])e(?:[^a-zA-Z]|$)/.test(latex)) return latex;
+    return `${latex} \\approx ${Number(value.toPrecision(6))}`;
+}
+
+/**
+ * 标题美化：去掉“步骤 N:”前缀（界面自带编号），并把标题中的 LaTeX 片段用 $...$ 包裹，供页面用 KaTeX 渲染
  */
 export function prettifyTitle(title) {
-    return normalizeTitle(title).title;
+    let t = String(title || '').replace(/^\s*步骤\s*\d+\s*[:：]\s*/, '').replace(/^[⚠️✅❗\s]+/u, '').replace(/[：:。.；;\s]+$/u, '').replace(/\s{2,}/g, ' ');
+    if (t.includes('$')) return t;
+    return t.replace(/(?:\\[a-zA-Z]+|[A-Za-z0-9]\^\{|[A-Za-z]_\{)[\x20-\x7E]*/g, (m) => {
+        const trimmed = m.replace(/\s+$/, '');
+        const tail = m.slice(trimmed.length);
+        return `$${trimmed}$${tail}`;
+    });
 }
 
+const KIND_LABELS = { given: '题目', method: '方法', compute: '计算', check: '检验', warn: '注意', conclusion: '结论' };
+
+function inferKind(title, index) {
+    if (index === 0) return 'given';
+    if (/⚠|警告|未能|发散|不一致|不存在|无法|不支持|失败|无解|不收敛/.test(title)) return 'warn';
+    if (/验证|检验|校验|交叉|排除增根/.test(title)) return 'check';
+    if (/应用|套用|利用|采用|使用|查基本|查表|令 |选取|换元|分部|洛必达|公式|法则|定理|方法|识别|设定|尝试|化为|转化|改用/.test(title)) return 'method';
+    return 'compute';
+}
+
+const GENERIC_FINAL = /^(得到.*(解|结果)|最终.*结果|追加任意积分常数.*|得到.*通解|.*的通解|满足初始条件的特解)$/;
+
 /**
- * 统一出口：所有求解器都经过这里，保证步骤与结果风格一致（见 normalize.js）
+ * 统一输出：规整标题与 LaTeX、去掉空步骤与相邻重复步骤、给每步标注类型，
+ * 并保证最后一步是与“结果”一致的结论。
  */
-export function formatOutput({ resultLatex, steps, plotData }) {
-    const result = normalizeResult(cleanMathLatex(resultLatex || ''));
-    return {
-        resultLatex: result,
-        steps: normalizeSteps(steps, result),
-        plotData: plotData || null
-    };
+export function formatOutput({ resultLatex, steps, plotData, type }) {
+    const result = cleanMathLatex(resultLatex || '');
+    const norm = (x) => String(x).replace(/\s+/g, '');
+
+    let list = (steps || [])
+        .map(st => ({ title: prettifyTitle(st.title || ''), latex: cleanMathLatex(st.latex || ''), kind: st.kind }))
+        .filter(st => st.latex || st.title);
+    list = list.filter((st, i) => i === 0 || !(norm(st.latex) === norm(list[i - 1].latex) && st.title === list[i - 1].title));
+
+    list.forEach((st, i) => { st.kind = st.kind || inferKind(st.title, i); });
+
+    if (result && list.length) {
+        const last = list[list.length - 1];
+        const covered = norm(last.latex) === norm(result) || norm(last.latex).includes(norm(result));
+        if (covered && last.kind !== 'warn') {
+            last.kind = 'conclusion';
+            if (GENERIC_FINAL.test(last.title) || !last.title) last.title = '结论';
+        } else if (!covered) {
+            list.push({ title: '结论', latex: result, kind: last.kind === 'warn' ? 'warn' : 'conclusion' });
+        }
+    }
+    list.forEach(st => { if (!st.title) st.title = KIND_LABELS[st.kind] || ''; });
+
+    return { resultLatex: result, steps: list, plotData: plotData || null, type: type || null };
 }
 
 /**
@@ -1798,7 +1862,7 @@ export function solveIntegral({ targetExpr, variable, lower, upper, isDefinite, 
             { layerId: 'f', x: U, y: integrandFn(U), label: `积分上限 b=${MC.fmt(U)}`, name: '积分上限', latex: `b = ${MC.fmt(U)}`, style: 'solid', color: '#38bdf8' }
         ].filter(p => isFinite(p.y)) : []
     };
-    return formatOutput({ resultLatex: finalLatex, steps, plotData });
+    return formatOutput({ resultLatex: withApprox(finalLatex, finalVal), steps, plotData });
 }
 
 // ==========================================
@@ -1883,7 +1947,7 @@ export function solveLimit({ targetExpr, variable, targetValue, conditionExpr, d
             const fnv = fn(pt.num);
             if (typeof dv === 'number' && isFinite(dv) && isFinite(fnv) && Math.abs(dv - fnv) < 1e-6 * (1 + Math.abs(fnv))) {
                 steps.push({ title: '函数在该点连续，直接代入求值', latex: `\\lim_{${arrow}} \\left(${exprLatex}\\right) = ${cleanMathLatex(direct.toLatex())}` });
-                return formatOutput({ resultLatex: cleanMathLatex(direct.toLatex()), steps, plotData: buildPlot(dv, 'finite') });
+                return formatOutput({ resultLatex: withApprox(cleanMathLatex(direct.toLatex()), dv), steps, plotData: buildPlot(dv, 'finite') });
             }
         } catch (e) { /* 继续 */ }
     }
@@ -1950,7 +2014,7 @@ export function solveLimit({ targetExpr, variable, targetValue, conditionExpr, d
             steps.push({ title: '分别计算左、右极限，两者相等', latex: `\\lim_{${varName}\\to ${pt.latex}^-} = ${MC.describeNumber(nl.left.value).latex}, \\quad \\lim_{${varName}\\to ${pt.latex}^+} = ${MC.describeNumber(nl.right.value).latex}` });
         }
         steps.push({ title: `${titleNote}${sideNote}`, latex: `\\lim_{${arrow}} \\left(${exprLatex}\\right) = ${latex}` });
-        return formatOutput({ resultLatex: latex, steps, plotData: buildPlot(v, 'finite') });
+        return formatOutput({ resultLatex: withApprox(latex, v), steps, plotData: buildPlot(v, 'finite') });
     }
     if (nl.kind === 'inf') {
         const tex = nl.value > 0 ? '+\\infty' : '-\\infty';
@@ -2066,7 +2130,8 @@ export function solveEquation({ lhs, rhs, variable, conditionExpr }, ce) {
         if (periodic) steps.push({ title: '三角方程有无穷多组解，此处仅列出扫描区间内的实根', latex: `\\text{周期函数：解集 = 区间内各解 } + \\text{ 整数个周期}` });
     }
 
-    // 组装结果
+    // 组装结果：实根按从小到大排列
+    valid.sort((p, q) => p.val - q.val);
     let resultLatex;
     const showRoots = valid.slice(0, 12);
     if (special === 'identity') resultLatex = `\\text{恒成立（定义域内任意 } ${variable}\\text{）}`;
@@ -2730,7 +2795,7 @@ export function solveSeries({ kind, body, variable, lower, upper }, ce) {
         } catch (e) { latex = null; }
         if (!latex) { const d = MC.describeNumber(acc); latex = d.exact ? d.latex : `\\approx ${d.latex}`; }
         steps.push({ title: '逐项累加（乘）得到结果', latex: `${sym}_{${v}=${lowTex}}^{${upTex}} ${bodyLatex} = ${latex}` });
-        return formatOutput({ resultLatex: latex, steps, plotData: null });
+        return formatOutput({ resultLatex: withApprox(latex, acc), steps, plotData: null });
     }
 
     if (isProd || U !== Infinity || !isFinite(L)) return formatOutput({ resultLatex: '\\text{仅支持有限连乘与 } n \\to +\\infty \\text{ 的无穷级数}', steps, plotData: null });
@@ -2753,7 +2818,7 @@ export function solveSeries({ kind, body, variable, lower, upper }, ce) {
     const d = MC.describeNumber(limit);
     const latex = d.exact ? d.latex : `\\approx ${d.latex}`;
     steps.push({ title: d.exact ? '识别精确值' : '数值结果', latex: `${sym}_{${v}=${lowTex}}^{\\infty} ${bodyLatex} = ${latex}` });
-    return formatOutput({ resultLatex: latex, steps, plotData: null });
+    return formatOutput({ resultLatex: withApprox(latex, limit), steps, plotData: null });
 }
 
 // ==========================================
@@ -2798,7 +2863,8 @@ export function solveGeneralAlgebra({ targetExpr, conditionExpr }, ce) {
             if (typeof val === 'number' && isFinite(val)) steps.push({ title: '十进制近似值', latex: `\\approx ${MC.fmt(Number(val.toPrecision(12)))}` });
         } catch (e) { }
     }
-    const resTex = cleanMathLatex(evalResult.toLatex());
+    let resTex = cleanMathLatex(evalResult.toLatex());
+    if (free.length === 0) { try { resTex = withApprox(resTex, MC.compileAST(cleanExpr, '__none__')(0)); } catch (e) { } }
     steps.push({ title: '最终计算结果', latex: resTex });
     return formatOutput({
         resultLatex: resTex,
