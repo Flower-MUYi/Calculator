@@ -1,5 +1,6 @@
 // solvers.js —— 现代全功能微积分、代数与微分方程分步推导引擎
 import * as MC from './mathcore.js';
+import { normalizeLatex, normalizeTitle, normalizeSteps, normalizeResult } from './normalize.js';
 
 /**
  * 求解线性代数方程组 (高斯主元消去法)
@@ -98,35 +99,28 @@ export function cleanMathLatex(latexStr) {
     str = str.replace(directPattern, (m, fn, arg, exp) => `\\${fn}^${exp.startsWith('{') ? exp : `{${exp}}`}${arg}`);
 
     // 清理多余符号和正负号重叠
-    str = str.replace(/\+\s*-/g, '- ')
-             .replace(/-\s*-/g, '+ ')
-             .replace(/\\left\(\s*\\right\)/g, '')
+    str = str.replace(/\\left\(\s*\\right\)/g, '')
              .replace(/(?<![0-9.])1(?=\\ln)/g, '')
              .replace(/(?<![0-9.])1(?=\\pi)/g, '');
 
-    return str;
+    return normalizeLatex(str);
 }
 
 /**
- * 标题美化：去掉“步骤 N:”前缀（界面自带编号），并把标题中的 LaTeX 片段用 $...$ 包裹，供页面用 KaTeX 渲染
+ * 标题美化（保留旧接口）：交给 normalizeTitle 统一处理
  */
 export function prettifyTitle(title) {
-    let t = String(title || '').replace(/^\s*步骤\s*\d+\s*[:：]\s*/, '');
-    if (t.includes('$')) return t;
-    return t.replace(/(?:\\[a-zA-Z]+|[A-Za-z0-9]\^\{|[A-Za-z]_\{)[\x20-\x7E]*/g, (m) => {
-        const trimmed = m.replace(/\s+$/, '');
-        const tail = m.slice(trimmed.length);
-        return `$${trimmed}$${tail}`;
-    });
+    return normalizeTitle(title).title;
 }
 
+/**
+ * 统一出口：所有求解器都经过这里，保证步骤与结果风格一致（见 normalize.js）
+ */
 export function formatOutput({ resultLatex, steps, plotData }) {
+    const result = normalizeResult(cleanMathLatex(resultLatex || ''));
     return {
-        resultLatex: cleanMathLatex(resultLatex || ''),
-        steps: (steps || []).map(s => ({
-            title: prettifyTitle(s.title || ''),
-            latex: cleanMathLatex(s.latex || '')
-        })),
+        resultLatex: result,
+        steps: normalizeSteps(steps, result),
         plotData: plotData || null
     };
 }
