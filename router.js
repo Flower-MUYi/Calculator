@@ -10,7 +10,8 @@ import {
     solveFunctionDeclaration,
     solveGeneralAlgebra,
     solveODE,
-    solveSeries
+    solveSeries,
+    formatOutput
 } from './solvers.js';
 import { freeSymbols } from './mathcore.js';
 
@@ -218,12 +219,12 @@ export function routeCalculation(ast, ce) {
         }
     } catch (err) {
         console.error("Calculation router error:", err);
-        return {
-            resultLatex: `\\text{计算出现异常: } ${String(err.message || '未知错误').replace(/[\\{}_^#%&$~]/g, ' ')}`,
-            steps: [
-                { title: "推导异常中断", latex: `\\text{错误信息: } ${String(err.message || '格式无法解析').replace(/[\\{}_^#%&$~]/g, ' ')}` }
-            ],
+        // 错误信息放进 \text{} 前去掉 LaTeX 控制字符，并统一走 formatOutput
+        const msg = String(err?.message || '未知错误').replace(/[\\{}_^#%&$~]/g, ' ').replace(/\s+/g, ' ').trim();
+        return formatOutput({
+            resultLatex: `\\text{计算出现异常：${msg}}`,
+            steps: [{ title: '推导异常中断', latex: `\\text{错误信息：${msg}}`, type: 'warn' }],
             plotData: null
-        };
+        });
     }
 }
