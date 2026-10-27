@@ -133,6 +133,9 @@
         .step-title .katex { font-size: 1em; }
         .step-math { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 10px 14px; overflow-x: auto; font-size: 1.15rem; }
         .step.final .step-no { background: var(--accent); color: #fff; }
+        .step.warn .step-no { border-color: #b45309; color: #b45309; }
+        .step.warn .step-title { color: #b45309; }
+        .step.warn .step-math { border-color: #b45309; }
         .step.reveal { animation: settle .38s ease both; animation-delay: calc(var(--i) * 55ms); }
         @keyframes settle { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
@@ -350,7 +353,7 @@
             }
             steps.forEach((step, i) => {
                 const li = document.createElement('li');
-                li.className = 'step reveal' + (i === steps.length - 1 ? ' final' : '');
+                li.className = 'step reveal' + (i === steps.length - 1 ? ' final' : '') + (step.type === 'warn' ? ' warn' : '');
                 li.style.setProperty('--i', Math.min(i, 12));
                 li.innerHTML = `
                     <span class="step-no" aria-hidden="true">${i + 1}</span>
