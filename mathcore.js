@@ -906,10 +906,10 @@ export function integrateRational(num, den, v = 'x') {
     const fac = factorReal(den);
     const lead = fac.lead;
     const nrm = pScale(rem, 1 / lead);
-    steps.push({
-        title: '在实数域内对分母因式分解',
-        latex: `${polyLatex(den, v)} = ${factorLatex(fac, v)}`
-    });
+    const irreducible = fac.linear.length === 0 && fac.quad.length === 1 && fac.quad[0].mult === 1;
+    steps.push(irreducible
+        ? { title: '分母在实数域内不可再分解（判别式小于 0）', latex: `${polyLatex(den, v)} \\;\\text{不可约}` }
+        : { title: '在实数域内对分母因式分解', latex: `${polyLatex(den, v)} = ${factorLatex(fac, v)}` });
 
     // 构造未知量与基函数
     const unknowns = [];
