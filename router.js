@@ -10,7 +10,9 @@ import {
     solveFunctionDeclaration,
     solveGeneralAlgebra,
     solveODE,
-    solveSeries
+    solveSeries,
+    solveMatrix,
+    containsMatrix
 } from './solvers.js';
 import { freeSymbols } from './mathcore.js';
 
@@ -91,6 +93,11 @@ export function routeCalculation(ast, ce) {
                 targetAst = items[0];
                 conditionExpr = items[1] || null;
             }
+        }
+
+        // 含矩阵的表达式：加减乘幂、转置、逆、行列式……
+        if (containsMatrix(targetAst)) {
+            return typed('矩阵运算', () => solveMatrix({ expr: targetAst }, ce));
         }
 
         if (!Array.isArray(targetAst)) {

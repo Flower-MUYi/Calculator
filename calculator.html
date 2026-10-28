@@ -115,6 +115,11 @@
         .btn-quiet[hidden] { display: none; }
         #resultOutput { min-height: 64px; display: flex; align-items: center; overflow-x: auto; padding: 8px 2px; font-size: 1.55rem; }
         #resultOutput .hl { display: inline-block; max-width: 100%; padding: 4px 10px; background: linear-gradient(transparent 52%, var(--marker) 52%, var(--marker) 92%, transparent 92%); }
+        /* 矩阵 / 多行结论：块状荧光标记 */
+        #resultOutput .hl.block { display: block; width: 100%; padding: 14px 18px; text-align: center; font-size: 1.7rem; background: rgba(255, 230, 107, .3); border-left: 5px solid var(--marker); border-radius: 0 4px 4px 0; }
+        #resultOutput .hl.block .katex-display { margin: 0; }
+        .step-math .katex-display { margin: 0.35em 0; }
+        .step-math .mtable .arraycolsep { width: 1em; }
         .empty { color: var(--ink-soft); font-size: 0.95rem; }
         .problem { color: var(--warn); font-size: 0.95rem; }
 
@@ -275,7 +280,10 @@
             { label: '圆', latex: 'x^2+y^2=4' },
             { label: '微分方程', latex: "y'+2y=x" },
             { label: '二阶方程', latex: "y''+y=0" },
-            { label: '级数', latex: '\\sum_{n=1}^{\\infty}\\frac{1}{n^2}' }
+            { label: '级数', latex: '\\sum_{n=1}^{\\infty}\\frac{1}{n^2}' },
+            { label: '矩阵乘法', latex: '\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}\\begin{pmatrix}0&1\\\\1&0\\end{pmatrix}' },
+            { label: '矩阵求逆', latex: '\\begin{pmatrix}2&1\\\\1&2\\end{pmatrix}^{-1}' },
+            { label: '矩阵总览', latex: '\\begin{pmatrix}2&1&0\\\\1&3&1\\\\0&1&2\\end{pmatrix}' }
         ];
 
         // ---------- KaTeX 渲染 ----------
@@ -283,7 +291,7 @@
         const MACROS = {
             '\\exponentialE': '\\mathrm{e}', '\\differentialD': '\\mathrm{d}', '\\imaginaryI': '\\mathrm{i}',
             '\\imaginaryJ': '\\mathrm{j}', '\\mleft': '\\left', '\\mright': '\\right',
-            '\\placeholder': '\\square', '\\operatorname*': '\\operatorname', '\\Nothing': '\\varnothing'
+            '\\placeholder': '\\square', '\\arraystretch': '1.35', '\\operatorname*': '\\operatorname', '\\Nothing': '\\varnothing'
         };
         if (window.katex && !window.katex.__patched) {
             const rs = window.katex.renderToString.bind(window.katex), rd = window.katex.render.bind(window.katex);
@@ -349,8 +357,9 @@
             lastResultLatex = output.resultLatex || '';
             if (lastResultLatex) {
                 const hl = document.createElement('span');
-                hl.className = 'hl';
-                setMath(hl, lastResultLatex, false);
+                const multi = /matrix|\\begin\{(aligned|cases|array)\}/.test(lastResultLatex);
+                hl.className = multi ? 'hl block' : 'hl';
+                setMath(hl, lastResultLatex, multi);
                 resultOutput.replaceChildren(hl);
                 copyBtn.hidden = false;
             } else {

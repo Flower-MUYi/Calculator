@@ -176,7 +176,8 @@ export function formatOutput({ resultLatex, steps, plotData, type }) {
 
     if (result && list.length) {
         const last = list[list.length - 1];
-        const covered = norm(last.latex) === norm(result) || norm(last.latex).includes(norm(result));
+        const nl = norm(last.latex), nr = norm(result);
+        const covered = nl === nr || nl.endsWith('=' + nr) || nl.endsWith('\\approx' + nr) || (nr.length > 14 && nl.includes(nr));
         if (covered && last.kind !== 'warn') {
             last.kind = 'conclusion';
             if (GENERIC_FINAL.test(last.title) || !last.title) last.title = '结论';
@@ -2871,4 +2872,294 @@ export function solveGeneralAlgebra({ targetExpr, conditionExpr }, ce) {
         steps,
         plotData: free.length === 1 ? { layers: [{ id: 'f', label: `f(${v})`, name: `f(${v})`, latex: `f(${v}) = ${cleanMathLatex(expr.toLatex())}`, color: '#38bdf8', visible: true, fn }], points: [] } : { layers: [], points: [] }
     });
+}
+
+// ==========================================
+// 8. 矩阵运算：加减、数乘、乘法、幂、转置、逆、行列式、迹、秩，以及特征值/特征向量总览
+// ==========================================
+
+export function containsMatrix(node) {
+    const n = MC.unwrap(node);
+    if (!Array.isArray(n)) return false;
+    if (n[0] === 'Matrix') return true;
+    return n.slice(1).some(containsMatrix);
+}
+
+function parseMatrixNode(node) {
+    const n = MC.unwrap(node);
+    const body = MC.unwrap(n[1]);
+    if (!Array.isArray(body) || body[0] !== 'List') throw new Error('无法识别矩阵结构');
+    const data = body.slice(1).map(r => {
+        const row = MC.unwrap(r);
+        if (!Array.isArray(row) || row[0] !== 'List') throw new Error('无法识别矩阵的行');
+        return row.slice(1).map(e => {
+            let v;
+            try { v = MC.compileAST(e, '__n')(0); } catch (err) { v = NaN; }
+            if (typeof v !== 'number' || !isFinite(v)) throw new Error('矩阵元素需为具体数值（暂不支持含字母的符号矩阵）');
+            return v;
+        });
+    });
+    if (!data.length || data.some(r => r.length !== data[0].length || r.length === 0)) throw new Error('矩阵各行的列数不一致');
+    const delim = typeof n[2] === 'string' ? n[2] : '';
+    return { data, det: delim.includes('|') };
+}
+
+function matExprLatex(node) {
+    const n = MC.unwrap(node);
+    if (typeof n === 'number') return MC.fmt(n);
+    if (typeof n === 'string') return n === 'Pi' ? '\\pi' : n;
+    if (!Array.isArray(n)) return '';
+    const [op, ...a] = n;
+    const L = a.map(matExprLatex);
+    switch (op) {
+        case 'Matrix': { const m = parseMatrixNode(n); return m.det ? MC.matLatex(m.data, 'vmatrix') : MC.matLatex(m.data); }
+        case 'Add': return L.join(' + ');
+        case 'Subtract': return `${L[0]} - ${L[1]}`;
+        case 'Negate': return `-${L[0]}`;
+        case 'Multiply': return L.join(' \\, ');
+        case 'Divide': return `\\frac{${L[0]}}{${L[1]}}`;
+        case 'Power': return `{${L[0]}}^{${L[1]}}`;
+        case 'Transpose': return `{${L[0]}}^{\\mathsf{T}}`;
+        case 'Inverse': return `{${L[0]}}^{-1}`;
+        case 'Determinant': return `\\det ${L[0]}`;
+        case 'Trace': return `\\operatorname{tr} ${L[0]}`;
+        case 'Rank': return `\\operatorname{rank} ${L[0]}`;
+        default: return L.join(' ');
+    }
+}
+
+function detSteps(A, steps, label = 'A') {
+    const n = A.length;
+    const d = MC.matDet(A);
+    const V = (M) => MC.matLatex(M, 'vmatrix');
+    const p = (v) => (v < 0 ? `(${MC.fmt(v)})` : MC.fmt(v));
+    if (n === 1) {
+        steps.push({ title: '一阶矩阵的行列式就是它的唯一元素', latex: `\\det ${label} = ${MC.fmt(A[0][0])}` });
+    } else if (n === 2) {
+        const [[a, b], [c, e]] = A;
+        steps.push({ title: '二阶行列式：主对角线乘积减去副对角线乘积', latex: `${V(A)} = ${p(a)}\\cdot${p(e)} - ${p(b)}\\cdot${p(c)} = ${MC.fmt(d.det)}` });
+    } else if (n === 3) {
+        const minor = (j) => A.slice(1).map(r => r.filter((_, k) => k !== j));
+        const terms = A[0].map((v, j) => `${j % 2 ? '-' : '+'} ${p(v)}${V(minor(j))}`).join(' ').replace(/^\+ /, '');
+        steps.push({ title: '三阶行列式：按第一行展开（代数余子式）', latex: `\\det ${label} = ${terms}` });
+        const vals = A[0].map((v, j) => `${j % 2 ? '-' : '+'} ${p(v)}\\cdot${p(MC.matDet(minor(j)).det)}`).join(' ').replace(/^\+ /, '');
+        steps.push({ title: '分别计算各个二阶余子式', latex: `\\det ${label} = ${vals} = ${MC.fmt(d.det)}` });
+    } else {
+        steps.push({ title: '阶数较高：用高斯消元化为上三角矩阵，行列式等于对角线乘积（每换一次行变号）', latex: `${MC.matLatex(d.U)}, \\quad \\text{换行 } ${d.swaps} \\text{ 次}` });
+        steps.push({ title: '对角线元素相乘', latex: `\\det ${label} = ${(d.swaps % 2 ? '(-1)^{' + d.swaps + '}\\cdot ' : '')}${d.U.map((r, i) => p(r[i])).join('\\cdot')} = ${MC.fmt(d.det)}` });
+    }
+    return d.det;
+}
+
+function invSteps(A, steps) {
+    const n = A.length;
+    if (n !== A[0].length) throw new Error('只有方阵才有逆矩阵');
+    const det = MC.matDet(A).det;
+    steps.push({ title: '先计算行列式，判断矩阵是否可逆', latex: `\\det A = ${MC.fmt(det)}` });
+    if (Math.abs(det) < 1e-10) {
+        const err = new Error('singular'); err.singular = true; throw err;
+    }
+    const inv = MC.matInverse(A);
+    if (n === 2) {
+        const [[a, b], [c, d]] = A;
+        steps.push({ title: '二阶矩阵求逆公式：A^{-1} = \\frac{1}{ad-bc}\\begin{pmatrix} d & -b \\\\ -c & a \\end{pmatrix}'.replace(/^(.*?：)(.*)$/, '$1$$$2$$'), latex: `A^{-1} = \\frac{1}{${MC.fmt(det)}}${MC.matLatex([[d, -b], [-c, a]])} = ${MC.matLatex(inv)}` });
+    } else {
+        steps.push({ title: '写出增广矩阵 [A | I]，通过初等行变换化为 [I | A^{-1}]', latex: `${MC.augLatex(A, MC.matIdentity(n))} \\;\\longrightarrow\\; ${MC.augLatex(MC.matIdentity(n), inv)}` });
+    }
+    return inv;
+}
+
+function evalMatrix(node, steps) {
+    const n = MC.unwrap(node);
+    const M = (v) => MC.matLatex(v);
+    const same = (A, B) => A.length === B.length && A[0].length === B[0].length;
+    const dim = (A) => `${A.length}×${A[0].length}`;
+    const isM = (x) => x.k === 'm';
+
+    if (typeof n === 'number') return { k: 's', v: n };
+    if (typeof n === 'string') {
+        if (n === 'Pi') return { k: 's', v: Math.PI };
+        if (n === 'ExponentialE') return { k: 's', v: Math.E };
+        if (n === 'T') return { k: 't' };
+        throw new Error(`矩阵表达式中含有未知符号 ${n}`);
+    }
+    if (!Array.isArray(n)) throw new Error('无法识别的表达式');
+    const [op, ...a] = n;
+
+    if (op === 'Matrix') {
+        const m = parseMatrixNode(n);
+        if (m.det) {
+            if (m.data.length !== m.data[0].length) throw new Error('只有方阵才有行列式');
+            return { k: 's', v: detSteps(m.data, steps) };
+        }
+        return { k: 'm', v: m.data };
+    }
+    const E = a.map(x => (op === 'Power' && a.indexOf(x) === 1) ? x : x);
+
+    if (op === 'Add' || op === 'Subtract') {
+        let acc = evalMatrix(a[0], steps);
+        for (let i = 1; i < a.length; i++) {
+            const nx = evalMatrix(a[i], steps);
+            const s = op === 'Subtract' ? -1 : 1;
+            if (isM(acc) !== isM(nx)) throw new Error('矩阵不能与数直接相加减');
+            if (isM(acc)) {
+                if (!same(acc.v, nx.v)) throw new Error(`矩阵形状不同（${dim(acc.v)} 与 ${dim(nx.v)}），无法相加减`);
+                const res = MC.matAdd(acc.v, nx.v, s);
+                steps.push({ title: `矩阵${s > 0 ? '加' : '减'}法：对应位置的元素逐个${s > 0 ? '相加' : '相减'}`, latex: `${M(acc.v)} ${s > 0 ? '+' : '-'} ${M(nx.v)} = ${M(res)}` });
+                acc = { k: 'm', v: res };
+            } else acc = { k: 's', v: acc.v + s * nx.v };
+        }
+        return acc;
+    }
+    if (op === 'Negate') {
+        const x = evalMatrix(a[0], steps);
+        return isM(x) ? { k: 'm', v: MC.matScale(x.v, -1) } : { k: 's', v: -x.v };
+    }
+    if (op === 'Multiply') {
+        let acc = evalMatrix(a[0], steps);
+        for (let i = 1; i < a.length; i++) {
+            const nx = evalMatrix(a[i], steps);
+            if (!isM(acc) && !isM(nx)) acc = { k: 's', v: acc.v * nx.v };
+            else if (!isM(acc) || !isM(nx)) {
+                const k = isM(acc) ? nx.v : acc.v, A = isM(acc) ? acc.v : nx.v;
+                const res = MC.matScale(A, k);
+                steps.push({ title: `数乘：用 ${MC.fmt(k)} 乘以矩阵的每一个元素`, latex: `${MC.fmt(k)}${M(A)} = ${M(res)}` });
+                acc = { k: 'm', v: res };
+            } else {
+                if (acc.v[0].length !== nx.v.length) throw new Error(`第一个矩阵的列数（${acc.v[0].length}）必须等于第二个矩阵的行数（${nx.v.length}），${dim(acc.v)} 与 ${dim(nx.v)} 不能相乘`);
+                const res = MC.matMul(acc.v, nx.v);
+                steps.push({ title: `矩阵乘法（${dim(acc.v)} 乘 ${dim(nx.v)} 得 ${dim(res)}）：$c_{ij}=\\sum_k a_{ik}b_{kj}$，即第 i 行与第 j 列对应相乘再求和`, latex: `${M(acc.v)}${M(nx.v)} = ${M(res)}` });
+                steps.push({ title: '以第 1 行第 1 列的元素为例演示计算', latex: MC.matEntryDetail(acc.v, nx.v, 0, 0) });
+                acc = { k: 'm', v: res };
+            }
+        }
+        return acc;
+    }
+    if (op === 'Divide') {
+        const x = evalMatrix(a[0], steps), y = evalMatrix(a[1], steps);
+        if (isM(y)) throw new Error('不能用矩阵作除数，请改用逆矩阵');
+        if (isM(x)) { const res = MC.matScale(x.v, 1 / y.v); steps.push({ title: `每个元素除以 ${MC.fmt(y.v)}`, latex: `\\frac{1}{${MC.fmt(y.v)}}${M(x.v)} = ${M(res)}` }); return { k: 'm', v: res }; }
+        return { k: 's', v: x.v / y.v };
+    }
+    if (op === 'Transpose' || op === 'Inverse' || op === 'Power') {
+        const base = evalMatrix(a[0], steps);
+        let kind = op, ex = null;
+        if (op === 'Power') {
+            const e = MC.unwrap(a[1]);
+            if (e === 'T' || e === 'Transpose') kind = 'Transpose';
+            else { try { ex = MC.compileAST(e, '__n')(0); } catch (err) { ex = NaN; } if (!Number.isInteger(ex)) throw new Error('矩阵的幂只支持整数指数'); }
+        }
+        if (!isM(base)) return op === 'Power' ? { k: 's', v: Math.pow(base.v, ex) } : base;
+        if (kind === 'Transpose') {
+            const res = MC.matT(base.v);
+            steps.push({ title: '转置：行变列、列变行', latex: `${M(base.v)}^{\\mathsf{T}} = ${M(res)}` });
+            return { k: 'm', v: res };
+        }
+        if (kind === 'Inverse' || ex < 0) {
+            let inv = invSteps(base.v, steps);
+            if (kind === 'Inverse' || ex === -1) return { k: 'm', v: inv };
+            ex = -ex; base.v = inv;
+        }
+        if (ex !== null) {
+            if (base.v.length !== base.v[0].length) throw new Error('只有方阵才能求幂');
+            let res = MC.matIdentity(base.v.length);
+            const chain = [];
+            for (let i = 0; i < ex; i++) { res = MC.matMul(res, base.v); chain.push(res); }
+            steps.push({ title: ex === 0 ? '任何可逆方阵的 0 次幂等于单位矩阵' : `连乘 ${ex} 次（逐次相乘）`, latex: `${M(base.v)}^{${ex}} = ${M(res)}` });
+            return { k: 'm', v: res };
+        }
+    }
+    if (op === 'Determinant' || op === 'Trace' || op === 'Rank') {
+        const x = evalMatrix(a[0], steps);
+        if (!isM(x)) throw new Error('该运算的对象必须是矩阵');
+        if (op === 'Rank') {
+            const r = MC.matRank(x.v);
+            steps.push({ title: '用初等行变换化为阶梯形，非零行的个数就是秩', latex: `\\operatorname{rank} = ${r}` });
+            return { k: 's', v: r };
+        }
+        if (x.v.length !== x.v[0].length) throw new Error('只有方阵才有' + (op === 'Trace' ? '迹' : '行列式'));
+        if (op === 'Trace') {
+            const t = MC.matTrace(x.v);
+            steps.push({ title: '迹：主对角线元素之和', latex: `\\operatorname{tr} = ${x.v.map((r, i) => MC.fmt(r[i])).join(' + ')} = ${MC.fmt(t)}` });
+            return { k: 's', v: t };
+        }
+        return { k: 's', v: detSteps(x.v, steps) };
+    }
+    throw new Error(`矩阵表达式中暂不支持运算 ${op}`);
+}
+
+/** 单个矩阵的性质总览：形状、行列式、秩、迹、逆、特征值与特征向量 */
+function matrixOverview(A, steps) {
+    const [r, c] = MC.matShape(A);
+    const rows = [];
+    steps.push({ title: `这是一个 ${r}×${c} 矩阵${r === c ? '（方阵）' : ''}`, latex: `A = ${MC.matLatex(A)}` });
+    const rank = MC.matRank(A);
+    steps.push({ title: '用初等行变换化为阶梯形，非零行的个数就是秩', latex: `\\operatorname{rank} A = ${rank}` });
+    rows.push(`\\operatorname{rank} A &= ${rank}`);
+    rows.push(`A^{\\mathsf{T}} &= ${MC.matLatex(MC.matT(A))}`);
+    if (r === c) {
+        const det = detSteps(A, steps);
+        rows.unshift(`\\det A &= ${MC.fmt(det)}`);
+        const tr = MC.matTrace(A);
+        steps.push({ title: '迹：主对角线元素之和', latex: `\\operatorname{tr} A = ${A.map((row, i) => MC.fmt(row[i])).join(' + ')} = ${MC.fmt(tr)}` });
+        rows.splice(1, 0, `\\operatorname{tr} A &= ${MC.fmt(tr)}`);
+        if (Math.abs(det) > 1e-10) {
+            const inv = invSteps(A, steps);
+            rows.push(`A^{-1} &= ${MC.matLatex(inv)}`);
+        } else {
+            steps.push({ title: '行列式为 0，矩阵不可逆（奇异矩阵）', latex: `\\det A = 0 \\implies A^{-1} \\text{ 不存在}` });
+            rows.push('A^{-1} &\\text{ 不存在（奇异矩阵）}');
+        }
+        if (r <= 4) {
+            const cp = MC.matCharPoly(A);
+            steps.push({ title: '特征多项式 $\\det(\\lambda I - A)$', latex: `\\det(\\lambda I - A) = ${MC.polyLatex(cp, '\\lambda')}` });
+            const roots = MC.polyRoots(cp).roots;
+            const real = roots.filter(x => x.im === 0), cplx = roots.filter(x => x.im > 0);
+            const lam = (v) => { const d = MC.describeNumber(v); return d.exact ? d.latex : MC.fmt(v); };
+            const eigTxt = [
+                ...real.flatMap(x => Array(x.mult).fill(`${lam(x.re)}`)),
+                ...cplx.flatMap(x => Array(x.mult).fill(`${MC.fmt(x.re)} \\pm ${MC.fmt(x.im)}i`))
+            ].join(',\\; ');
+            steps.push({ title: '解特征方程，得特征值', latex: `\\lambda = ${eigTxt}` });
+            rows.push(`\\lambda &= ${eigTxt}`);
+            const vecs = [];
+            real.forEach(x => {
+                const shifted = A.map((row, i) => row.map((v, j) => v - (i === j ? x.re : 0)));
+                const basis = MC.matNullspace(shifted);
+                basis.forEach(v => vecs.push(`\\lambda = ${lam(x.re)}:\\; ${MC.matLatex(v.map(t => [t]))}`));
+            });
+            if (vecs.length) {
+                steps.push({ title: '对每个特征值解 $(A-\\lambda I)v=0$，得特征向量（取一个基础解系）', latex: vecs.join(',\\quad ') });
+                rows.push(`v &: ${vecs.join(',\\; ')}`);
+            }
+        }
+    }
+    return `\\begin{aligned} ${rows.join(' \\\\[8pt] ')} \\end{aligned}`;
+}
+
+export function solveMatrix({ expr }, ce) {
+    const steps = [];
+    steps.push({ title: '确定矩阵表达式', latex: matExprLatex(expr) });
+    try {
+        const top = MC.unwrap(expr);
+        // 单个矩阵 → 性质总览
+        if (Array.isArray(top) && top[0] === 'Matrix' && !parseMatrixNode(top).det) {
+            const A = parseMatrixNode(top).data;
+            steps.length = 0;
+            const result = matrixOverview(A, steps);
+            return formatOutput({ resultLatex: result, steps, plotData: null });
+        }
+        const out = evalMatrix(expr, steps);
+        let resultLatex;
+        if (out.k === 'm') resultLatex = MC.matLatex(out.v);
+        else { const d = MC.describeNumber(out.v); resultLatex = withApprox(d.exact ? d.latex : `\\approx ${d.latex}`, out.v); }
+        return formatOutput({ resultLatex, steps, plotData: null });
+    } catch (err) {
+        if (err.singular) {
+            steps.push({ title: '行列式为 0，矩阵不可逆（奇异矩阵）', latex: '\\det A = 0 \\implies A^{-1} \\text{ 不存在}' });
+            return formatOutput({ resultLatex: '\\text{矩阵不可逆（奇异矩阵）}', steps, plotData: null });
+        }
+        steps.push({ title: '无法完成矩阵运算', latex: `\\text{${String(err.message).replace(/[\\{}_^#%&$~]/g, ' ')}}` });
+        return formatOutput({ resultLatex: `\\text{${String(err.message).replace(/[\\{}_^#%&$~]/g, ' ')}}`, steps, plotData: null });
+    }
 }

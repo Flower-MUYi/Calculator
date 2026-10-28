@@ -1007,3 +1007,125 @@ export function polyAntiderivativeAst(p, v) {
     });
     return terms.length === 0 ? 0 : (terms.length === 1 ? terms[0] : ['Add', ...terms]);
 }
+
+// ==========================================
+// 8. 矩阵运算（数值矩阵）
+// ==========================================
+
+const clean0 = (v) => (Math.abs(v) < 1e-10 ? 0 : (Math.abs(v - Math.round(v)) < 1e-10 ? Math.round(v) : v));
+
+export const matShape = (A) => [A.length, A[0].length];
+export const matIdentity = (n) => Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+export const matT = (A) => A[0].map((_, j) => A.map(r => r[j]));
+export const matScale = (A, k) => A.map(r => r.map(v => clean0(v * k)));
+export const matAdd = (A, B, s = 1) => A.map((r, i) => r.map((v, j) => clean0(v + s * B[i][j])));
+export function matMul(A, B) {
+    return A.map((_, i) => B[0].map((__, j) => clean0(A[i].reduce((s, v, k) => s + v * B[k][j], 0))));
+}
+export const matTrace = (A) => clean0(A.reduce((s, r, i) => s + r[i], 0));
+
+/** 行列式（部分主元消元），同时返回上三角矩阵与换行次数 */
+export function matDet(A) {
+    const n = A.length;
+    const U = A.map(r => r.slice());
+    let swaps = 0, det = 1;
+    for (let c = 0; c < n; c++) {
+        let p = c;
+        for (let r = c + 1; r < n; r++) if (Math.abs(U[r][c]) > Math.abs(U[p][c])) p = r;
+        if (Math.abs(U[p][c]) < 1e-12) return { det: 0, U: U.map(r => r.map(clean0)), swaps };
+        if (p !== c) { [U[p], U[c]] = [U[c], U[p]]; swaps++; }
+        for (let r = c + 1; r < n; r++) {
+            const f = U[r][c] / U[c][c];
+            for (let k = c; k < n; k++) U[r][k] -= f * U[c][k];
+        }
+        det *= U[c][c];
+    }
+    return { det: clean0(det * (swaps % 2 ? -1 : 1)), U: U.map(r => r.map(clean0)), swaps };
+}
+
+/** 逆矩阵（高斯-若尔当）；奇异返回 null */
+export function matInverse(A) {
+    const n = A.length;
+    const M = A.map((r, i) => [...r, ...matIdentity(n)[i]]);
+    for (let c = 0; c < n; c++) {
+        let p = c;
+        for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+        if (Math.abs(M[p][c]) < 1e-12) return null;
+        [M[p], M[c]] = [M[c], M[p]];
+        const pv = M[c][c];
+        M[c] = M[c].map(v => v / pv);
+        for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c]; M[r] = M[r].map((v, k) => v - f * M[c][k]); }
+    }
+    return M.map(r => r.slice(n).map(clean0));
+}
+
+export function matRank(A, tol = 1e-9) {
+    const M = A.map(r => r.slice());
+    let rank = 0;
+    for (let c = 0; c < M[0].length && rank < M.length; c++) {
+        let p = rank;
+        for (let r = rank + 1; r < M.length; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+        if (Math.abs(M[p][c]) < tol) continue;
+        [M[p], M[rank]] = [M[rank], M[p]];
+        for (let r = rank + 1; r < M.length; r++) { const f = M[r][c] / M[rank][c]; for (let k = c; k < M[0].length; k++) M[r][k] -= f * M[rank][k]; }
+        rank++;
+    }
+    return rank;
+}
+
+/** 特征多项式 det(λI − A) 的系数（低次→高次），Faddeev–LeVerrier */
+export function matCharPoly(A) {
+    const n = A.length, c = new Array(n + 1).fill(0);
+    c[n] = 1;
+    let Mk = A.map(r => r.map(() => 0));
+    for (let k = 1; k <= n; k++) {
+        const AM = matMul(A, Mk);
+        Mk = AM.map((r, i) => r.map((v, j) => v + (i === j ? c[n - k + 1] : 0)));
+        c[n - k] = -matTrace(matMul(A, Mk)) / k;
+    }
+    return c.map(clean0);
+}
+
+/** (A − λI)v = 0 的基础解系 */
+export function matNullspace(M, tol = 1e-7) {
+    const R = M.map(r => r.slice()), rows = R.length, cols = R[0].length;
+    const piv = [];
+    let r0 = 0;
+    for (let c = 0; c < cols && r0 < rows; c++) {
+        let p = r0;
+        for (let r = r0 + 1; r < rows; r++) if (Math.abs(R[r][c]) > Math.abs(R[p][c])) p = r;
+        if (Math.abs(R[p][c]) < tol) continue;
+        [R[p], R[r0]] = [R[r0], R[p]];
+        const pv = R[r0][c];
+        R[r0] = R[r0].map(v => v / pv);
+        for (let r = 0; r < rows; r++) if (r !== r0) { const f = R[r][c]; R[r] = R[r].map((v, k) => v - f * R[r0][k]); }
+        piv.push(c); r0++;
+    }
+    const free = Array.from({ length: cols }, (_, i) => i).filter(i => !piv.includes(i));
+    return free.map(f => {
+        const v = new Array(cols).fill(0);
+        v[f] = 1;
+        piv.forEach((pc, i) => { v[pc] = -R[i][f]; });
+        // 归一化为首个非零分量为正的整数比（若可能）
+        const nz = v.find(x => Math.abs(x) > 1e-9) || 1;
+        let w = v.map(x => x / nz);
+        for (let d = 1; d <= 12; d++) { if (w.every(x => Math.abs(x * d - Math.round(x * d)) < 1e-7)) { w = w.map(x => Math.round(x * d)); break; } }
+        return w.map(clean0);
+    });
+}
+
+const numOrParen = (v) => (v < 0 ? `(${fmt(v)})` : fmt(v));
+
+/** 矩阵 → LaTeX（统一使用圆括号矩阵） */
+export function matLatex(A, env = 'pmatrix') {
+    return `\\begin{${env}} ${A.map(r => r.map(v => fmt(clean0(v))).join(' & ')).join(' \\\\ ')} \\end{${env}}`;
+}
+/** 增广矩阵 [A | B] */
+export function augLatex(A, B) {
+    const n = A[0].length, m = B[0].length;
+    return `\\left[\\begin{array}{${'c'.repeat(n)}|${'c'.repeat(m)}} ${A.map((r, i) => [...r, ...B[i]].map(v => fmt(clean0(v))).join(' & ')).join(' \\\\ ')} \\end{array}\\right]`;
+}
+export function matEntryDetail(A, B, i, j) {
+    const terms = A[i].map((v, k) => `${numOrParen(v)}\\cdot${numOrParen(B[k][j])}`).join(' + ');
+    return `c_{${i + 1}${j + 1}} = ${terms} = ${fmt(clean0(A[i].reduce((s, v, k) => s + v * B[k][j], 0)))}`;
+}
