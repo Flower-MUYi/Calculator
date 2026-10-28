@@ -37,7 +37,8 @@ export function toFrac(val, maxDen = 2000, tol = 1e-9) {
 
 /** 数值 → LaTeX（有理数用分式，否则保留 6 位有效数字） */
 export function fmt(val) {
-    if (typeof val !== 'number' || !isFinite(val)) return val > 0 ? '\\infty' : (val < 0 ? '-\\infty' : '\\text{NaN}');
+    if (typeof val !== 'number' || isNaN(val)) return '\\text{无定义}';
+    if (!isFinite(val)) return val > 0 ? '\\infty' : '-\\infty';
     const f = toFrac(val);
     if (f) return f.den === 1 ? `${f.num}` : `${f.num < 0 ? '-' : ''}\\frac{${Math.abs(f.num)}}{${f.den}}`;
     const s = Number(val.toPrecision(7)).toString();
@@ -1128,4 +1129,303 @@ export function augLatex(A, B) {
 export function matEntryDetail(A, B, i, j) {
     const terms = A[i].map((v, k) => `${numOrParen(v)}\\cdot${numOrParen(B[k][j])}`).join(' + ');
     return `c_{${i + 1}${j + 1}} = ${terms} = ${fmt(clean0(A[i].reduce((s, v, k) => s + v * B[k][j], 0)))}`;
+}
+
+// ==========================================
+// 9. 统一的 LaTeX 打印器：项排序、括号、上下标规范
+// ==========================================
+
+const GREEK = new Set(['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda', 'mu', 'sigma', 'phi', 'omega', 'rho', 'tau']);
+const FN_NAMES = {
+    Sin: '\\sin', Cos: '\\cos', Tan: '\\tan', Cot: '\\cot', Sec: '\\sec', Csc: '\\csc',
+    Arcsin: '\\arcsin', Arccos: '\\arccos', Arctan: '\\arctan', Arccot: '\\operatorname{arccot}',
+    Sinh: '\\sinh', Cosh: '\\cosh', Tanh: '\\tanh', Coth: '\\coth', Sech: '\\operatorname{sech}', Csch: '\\operatorname{csch}',
+    Arsinh: '\\operatorname{arsinh}', Arcosh: '\\operatorname{arcosh}', Artanh: '\\operatorname{artanh}',
+    Ln: '\\ln', Lb: '\\log_{2}', Sign: '\\operatorname{sgn}', Floor: '\\operatorname{floor}', Ceil: '\\operatorname{ceil}'
+};
+
+function symbolLatex(n) {
+    switch (n) {
+        case 'Pi': return '\\pi';
+        case 'ExponentialE': return 'e';
+        case 'ImaginaryUnit': return 'i';
+        case 'PositiveInfinity': case 'Infinity': return '\\infty';
+        case 'NegativeInfinity': return '-\\infty';
+        case 'Half': return '\\frac{1}{2}';
+        case 'Y': return 'y';
+        case 'Yp': return "y'";
+        case 'Ypp': return "y''";
+        case 'NaN': return '\\text{无定义}';
+        case 'ComplexInfinity': return '\\infty';
+    }
+    if (GREEK.has(n)) return `\\${n}`;
+    let m = n.match(/^([A-Za-z])(\d+)$/);
+    if (m) return `${m[1]}_{${m[2]}}`;
+    m = n.match(/^([A-Za-z])_(.+)$/);
+    if (m) return `${m[1]}_{${m[2]}}`;
+    if (/^[A-Za-z]$/.test(n)) return n;
+    if (/^[A-Za-z]+$/.test(n)) return `\\mathrm{${n}}`;
+    return n;
+}
+
+/** 把 MathJSON 打印成规范 LaTeX；遇到不支持的算子抛出异常，由调用方回退 */
+export function astToLatex(ast, options = {}) {
+    const free = [...freeSymbols(ast)];
+    const mainVar = options.mainVar || (free.includes('x') ? 'x' : (free.find(s => /^[a-z]$/.test(s)) || null));
+    const isVar = (n) => n === mainVar;
+
+    const numOf = (node) => {
+        const n = unwrap(node);
+        if (typeof n === 'number') return n;
+        if (Array.isArray(n) && n[0] === 'Rational' && typeof n[1] === 'number' && typeof n[2] === 'number') return n[1] / n[2];
+        if (n === 'Half') return 0.5;
+        return null;
+    };
+    const isInt = (v) => v !== null && Math.abs(v - Math.round(v)) < 1e-12;
+
+    const degOf = (node) => {
+        const n = unwrap(node);
+        if (typeof n === 'number') return 0;
+        if (typeof n === 'string') return isVar(n) ? 1 : 0;
+        if (!Array.isArray(n)) return 0;
+        const [op, ...a] = n;
+        switch (op) {
+            case 'Power': { const e = numOf(a[1]); return e === null ? 0.5 : degOf(a[0]) * e; }
+            case 'Square': return degOf(a[0]) * 2;
+            case 'Sqrt': return degOf(a[0]) * 0.5;
+            case 'Multiply': return a.reduce((s, x) => s + degOf(x), 0);
+            case 'Divide': return degOf(a[0]) - degOf(a[1]);
+            case 'Negate': return degOf(a[0]);
+            case 'Add': case 'Subtract': return Math.max(...a.map(degOf));
+            case 'Rational': return 0;
+            default: return 0.5;
+        }
+    };
+
+    const wrap = (r, need) => {
+        if (r.p >= need) return r.s;
+        const tall = /\\frac|\\int|\\sqrt|\\left|\\sum/.test(r.s);
+        return tall ? `\\left(${r.s}\\right)` : `(${r.s})`;
+    };
+    const R = (s, p, extra = {}) => ({ s, p, ...extra });
+
+    // 拆出符号：返回 { neg, node }
+    const splitSign = (node) => {
+        const n = unwrap(node);
+        const v = numOf(n);
+        if (v !== null && v < 0) return { neg: true, node: typeof n === 'number' ? -n : ['Rational', -n[1], n[2]] };
+        if (Array.isArray(n) && n[0] === 'Negate') { const s = splitSign(n[1]); return { neg: !s.neg, node: s.node }; }
+        if (Array.isArray(n) && n[0] === 'Multiply') {
+            const first = numOf(n[1]);
+            if (first !== null && first < 0) return { neg: true, node: first === -1 && n.length === 3 ? n[2] : ['Multiply', -first, ...n.slice(2)] };
+        }
+        return { neg: false, node: n };
+    };
+
+    const flattenAdd = (node, sign, out) => {
+        const n = unwrap(node);
+        if (Array.isArray(n) && n[0] === 'Add') n.slice(1).forEach(x => flattenAdd(x, sign, out));
+        else if (Array.isArray(n) && n[0] === 'Subtract') { flattenAdd(n[1], sign, out); flattenAdd(n[2], -sign, out); }
+        else if (Array.isArray(n) && n[0] === 'Negate') flattenAdd(n[1], -sign, out);
+        else { const sp = splitSign(n); out.push({ neg: (sign < 0) !== sp.neg, node: sp.node }); }
+    };
+
+    // 乘积：拆成分子、分母、数值系数
+    const collectProduct = (node, inv, st) => {
+        const n = unwrap(node);
+        const v = numOf(n);
+        if (v !== null) {
+            const f = toFrac(v);
+            if (f && !(typeof n === 'number' && f.den === 1)) { st.coefNum *= inv ? f.den : f.num; st.coefDen *= inv ? f.num : f.den; }
+            else if (inv) st.coefDen *= v; else st.coefNum *= v;
+            return;
+        }
+        if (Array.isArray(n)) {
+            const [op, ...a] = n;
+            if (op === 'Multiply') { a.forEach(x => collectProduct(x, inv, st)); return; }
+            if (op === 'Divide') { collectProduct(a[0], inv, st); collectProduct(a[1], !inv, st); return; }
+            if (op === 'Negate') { st.coefNum *= -1; collectProduct(a[0], inv, st); return; }
+            if (op === 'Power') {
+                const e = numOf(a[1]);
+                if (e !== null && e < 0) { (inv ? st.num : st.den).push(e === -1 ? a[0] : ['Power', a[0], -e]); return; }
+            }
+            if (op === 'Exp') {
+                const sp = splitSign(a[0]);
+                if (sp.neg) { (inv ? st.num : st.den).push(['Exp', sp.node]); return; }
+            }
+        }
+        (inv ? st.den : st.num).push(n);
+    };
+
+    const rank = (node) => {
+        const n = unwrap(node);
+        if (typeof n === 'string') return isVar(n) ? [2, n] : [1, n];
+        if (Array.isArray(n)) {
+            if (n[0] === 'Power' && unwrap(n[1]) === mainVar) return [2, mainVar];
+            if (n[0] === 'Power' && typeof unwrap(n[1]) === 'string') return [typeof unwrap(n[1]) === 'string' && isVar(unwrap(n[1])) ? 2 : 1, unwrap(n[1])];
+            if (n[0] === 'Square' && typeof unwrap(n[1]) === 'string') return [isVar(unwrap(n[1])) ? 2 : 1, unwrap(n[1])];
+            if (n[0] === 'Add' || n[0] === 'Subtract') return [4, ''];
+        }
+        return [3, ''];
+    };
+
+    const joinFactors = (items) => {
+        let out = '';
+        items.forEach((f, i) => {
+            if (i === 0) { out = f.s; return; }
+            const prev = items[i - 1];
+            const sep = (prev.fnTail || /^e\^/.test(f.s) || /^\\(?:sin|cos|tan|cot|sec|csc|ln|log|arc|operatorname)/.test(f.s) && /[A-Za-z}]$/.test(prev.s) && !prev.paren) ? '\\,' : '';
+            const needSpace = !sep && /\\[A-Za-z]+$/.test(prev.s) && /^[A-Za-z]/.test(f.s);
+            out += (needSpace ? ' ' : sep) + f.s;
+        });
+        return out;
+    };
+
+    const renderFactor = (node) => {
+        const r = render(node);
+        if (r.p < 2) return { s: wrap(r, 2), paren: true, fnTail: false };
+        return { s: r.s, paren: false, fnTail: !!r.fnTail };
+    };
+
+    const renderProductFactors = (list) => {
+        const sorted = list.map((n, i) => ({ n, i, r: rank(n) })).sort((a, b) => (a.r[0] - b.r[0]) || (a.r[0] <= 2 && a.r[1] !== b.r[1] ? (a.r[1] < b.r[1] ? -1 : 1) : 0) || (a.i - b.i));
+        return sorted.map(x => renderFactor(x.n));
+    };
+
+    function renderProduct(node) {
+        const st = { num: [], den: [], coefNum: 1, coefDen: 1 };
+        collectProduct(node, false, st);
+        let neg = st.coefNum * st.coefDen < 0;
+        let cn = Math.abs(st.coefNum), cd = Math.abs(st.coefDen);
+        if (cd !== 1 || !isInt(cn)) { const f = toFrac(cn / cd); if (f) { cn = f.num; cd = f.den; } else { cn = cn / cd; cd = 1; } }
+        else { const g = gcdInt(cn, cd); cn /= g; cd /= g; }
+        if (cn === 0) return R('0', 4);
+
+        const numF = renderProductFactors(st.num);
+        const denF = renderProductFactors(st.den);
+        const hasDen = denF.length > 0 || cd !== 1;
+        let numStr, numPrec = 4;
+        if (!hasDen) {
+            const parts = [];
+            if (cn !== 1 || numF.length === 0) parts.push({ s: fmt(cn), paren: false });
+            parts.push(...numF);
+            numStr = joinFactors(parts);
+            numPrec = parts.length > 1 ? 2 : (numF.length === 1 && !numF[0].paren ? 3 : (numF.length === 1 ? 2 : 4));
+            const lastIsFn = parts[parts.length - 1].fnTail;
+            const s = (neg ? '-' : '') + numStr;
+            return R(s, neg ? 0 : (parts.length > 1 ? 2 : (numF.length === 1 ? (st.num[0] && render(st.num[0]).p) : 4)), { fnTail: lastIsFn });
+        }
+        const nParts = [];
+        if (cn !== 1 || numF.length === 0) nParts.push({ s: fmt(cn), paren: false });
+        nParts.push(...numF);
+        const dParts = [];
+        if (cd !== 1 || denF.length === 0) dParts.push({ s: fmt(cd), paren: false });
+        dParts.push(...denF);
+        const strip = (items) => items.map(f => (f.paren ? { ...f, s: f.s.replace(/^\\left\(|^\(/, '').replace(/\\right\)$|\)$/, '') } : f));
+        const nS = nParts.length === 1 && nParts[0].paren ? strip(nParts)[0].s : joinFactors(nParts);
+        const dS = dParts.length === 1 && dParts[0].paren ? strip(dParts)[0].s : joinFactors(dParts);
+        return R(`${neg ? '-' : ''}\\frac{${nS}}{${dS}}`, neg ? 0 : 4);
+    }
+
+    function renderAdd(node) {
+        const terms = [];
+        flattenAdd(node, 1, terms);
+        const sorted = terms.map((t, i) => ({ ...t, i, d: degOf(t.node) })).sort((a, b) => (b.d - a.d) || (a.i - b.i));
+        let s = '';
+        sorted.forEach((t, i) => {
+            const body = render(t.node);
+            const txt = body.p < 1 ? wrap(body, 1) : body.s;
+            if (i === 0) s = (t.neg ? '-' : '') + txt;
+            else s += (t.neg ? ' - ' : ' + ') + txt;
+        });
+        return R(s, sorted.length === 1 && !sorted[0].neg ? render(sorted[0].node).p : 0);
+    }
+
+    function argOf(u, fnLatex) {
+        const r = render(u);
+        const simple = typeof unwrap(u) === 'string' || (typeof unwrap(u) === 'number' && unwrap(u) >= 0 && isInt(unwrap(u)));
+        if (simple) return R(`${fnLatex} ${r.s}`, 3, { fnTail: true });
+        if (r.p === 4 && /^\\left\|/.test(r.s)) return R(`${fnLatex}${r.s}`, 3, { fnTail: true });
+        return R(`${fnLatex}${/\\frac|\\int|\\sqrt|\\left/.test(r.s) ? `\\left(${r.s}\\right)` : `(${r.s})`}`, 3);
+    }
+
+    function renderPower(base, ex) {
+        const e = numOf(ex);
+        const bn = unwrap(base);
+        if (e === 1) return render(bn);
+        if (e === 0.5) return R(`\\sqrt{${render(bn).s}}`, 4);
+        if (e !== null && e < 0) return renderProduct(['Power', bn, e]);
+        if (e !== null && isInt(e) && Array.isArray(bn) && FN_NAMES[bn[0]] && bn.length === 2 && ['Sin', 'Cos', 'Tan', 'Cot', 'Sec', 'Csc', 'Sinh', 'Cosh', 'Tanh'].includes(bn[0])) {
+            const a = argOf(bn[1], `${FN_NAMES[bn[0]]}^{${e}}`);
+            return a;
+        }
+        if (e !== null && !isInt(e)) {
+            const f = toFrac(e);
+            if (f && f.num === 1 && f.den > 2 && f.den <= 9) return R(`\\sqrt[${f.den}]{${render(bn).s}}`, 4);
+        }
+        const rb = render(bn);
+        const baseStr = (rb.p >= 4 && !/\\frac/.test(rb.s) && !(typeof bn === 'number' && bn < 0)) ? rb.s : wrap({ s: rb.s, p: -1 }, 0);
+        const needParen = !(rb.p >= 4 && !/\\frac/.test(rb.s)) || (typeof bn === 'number' && bn < 0) || (Array.isArray(bn) && (bn[0] === 'Exp'));
+        const b = needParen ? ( /\\frac|\\int|\\sqrt|\\left/.test(rb.s) ? `\\left(${rb.s}\\right)` : `(${rb.s})`) : rb.s;
+        return R(`${b}^{${render(ex).s}}`, 3);
+    }
+
+    function render(node) {
+        const n = unwrap(node);
+        if (typeof n === 'number') {
+            if (!isFinite(n)) return R(isNaN(n) ? '\\text{无定义}' : (n > 0 ? '\\infty' : '-\\infty'), 4);
+            if (n < 0) return R(`-${fmt(-n)}`, 0);
+            return R(fmt(n), 4);
+        }
+        if (typeof n === 'string') return R(symbolLatex(n), n === 'NegativeInfinity' ? 0 : 4);
+        if (!Array.isArray(n)) throw new Error('unsupported node');
+        const [op, ...a] = n;
+        switch (op) {
+            case 'Add': case 'Subtract': return renderAdd(n);
+            case 'Negate': { const sp = splitSign(n); const inner = render(sp.node); return sp.neg ? R(`-${inner.p < 1 ? wrap(inner, 1) : inner.s}`, 0) : inner; }
+            case 'Multiply': case 'Divide': return renderProduct(n);
+            case 'Rational': { const v = numOf(n); if (v === null) return renderProduct(['Divide', a[0], a[1]]); const f = toFrac(v); return f && f.den !== 1 ? R(`${f.num < 0 ? '-' : ''}\\frac{${Math.abs(f.num)}}{${f.den}}`, f.num < 0 ? 0 : 4) : R(fmt(v), v < 0 ? 0 : 4); }
+            case 'Power': return renderPower(a[0], a[1]);
+            case 'Square': return renderPower(a[0], 2);
+            case 'Sqrt': return R(`\\sqrt{${render(a[0]).s}}`, 4);
+            case 'Root': { const k = numOf(a[1]); return k === 2 ? R(`\\sqrt{${render(a[0]).s}}`, 4) : R(`\\sqrt[${render(a[1]).s}]{${render(a[0]).s}}`, 4); }
+            case 'Exp': return R(`e^{${render(a[0]).s}}`, 3);
+            case 'Abs': return R(`\\left|${render(a[0]).s}\\right|`, 4);
+            case 'Log': return a.length === 1 ? argOf(a[0], '\\log') : argOf(a[0], `\\log_{${render(a[1]).s}}`);
+            case 'Integrate': return R(`\\int ${render(a[0]).s} \\, d${a[1] ? render(a[1]).s : 'x'}`, 0);
+            case 'Delimiter': return render(a[0]);
+            default:
+                if (FN_NAMES[op] && a.length === 1) return argOf(a[0], FN_NAMES[op]);
+                throw new Error('unsupported:' + op);
+        }
+    }
+    return render(ast).s;
+}
+
+/**
+ * 包装 Compute Engine：让所有 box(...).toLatex() 走统一打印器（失败时回退到 CE 自带输出）
+ */
+export function wrapCE(ce) {
+    const targets = new WeakMap();
+    const unwrapArg = (a) => (a && typeof a === 'object' && targets.has(a) ? targets.get(a) : a);
+    const isBox = (r) => r && typeof r === 'object' && typeof r.toLatex === 'function' && 'json' in r;
+    const wrapBox = (b) => {
+        const proxy = new Proxy(b, {
+            get(t, k) {
+                if (k === 'toLatex') return (...args) => { try { return astToLatex(t.json); } catch (e) { return t.toLatex(...args); } };
+                const v = Reflect.get(t, k, t);
+                if (typeof v === 'function') return (...args) => { const r = v.apply(t, args.map(unwrapArg)); return isBox(r) ? wrapBox(r) : r; };
+                return v;
+            }
+        });
+        targets.set(proxy, b);
+        return proxy;
+    };
+    return new Proxy(ce, {
+        get(t, k) {
+            const v = Reflect.get(t, k, t);
+            if ((k === 'box' || k === 'parse') && typeof v === 'function') return (...args) => { const r = v.apply(t, args.map(unwrapArg)); return isBox(r) ? wrapBox(r) : r; };
+            return typeof v === 'function' ? v.bind(t) : v;
+        }
+    });
 }

@@ -14,7 +14,7 @@ import {
     solveMatrix,
     containsMatrix
 } from './solvers.js';
-import { freeSymbols } from './mathcore.js';
+import { freeSymbols, wrapCE } from './mathcore.js';
 
 function isNothing(val) {
     return val === undefined || val === null || val === 'Nothing' || val === '' ||
@@ -74,8 +74,10 @@ function extractLimitPoint(pointNode, dirNode) {
     return { point, direction };
 }
 
-export function routeCalculation(ast, ce) {
+export function routeCalculation(ast, rawCE) {
     if (!ast) return { resultLatex: "", steps: [] };
+    // 所有 LaTeX 输出统一走规范打印器（排序、括号、上下标）
+    const ce = wrapCE(rawCE);
 
     try {
         let targetAst = ast;

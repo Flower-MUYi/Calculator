@@ -123,6 +123,12 @@ export function tidyLatex(str) {
             .replace(/-\s*-/g, '+ ')
             .replace(/\(\s*\)/g, '');
     }
+    // 上下标一律加花括号：x^2 → x^{2}，a_1 → a_{1}（不处理 \text{...} 内部）
+    t = t.split(/(\\text\{[^{}]*\})/).map((seg, i) => i % 2 ? seg : seg
+        .replace(/([\^_])(?!\{)(\\[A-Za-z]+|[A-Za-z0-9])/g, '$1{$2}')).join('');
+    // 无效数值统一显示
+    t = t.replace(/\\(?:operatorname|mathrm|text)\{\s*(?:NaN|Nothing|Undefined)\s*\}|\bNaN\b/g, '\\text{无定义}')
+         .replace(/\\tilde\{?\\infty\}?|\\operatorname\{ComplexInfinity\}/g, '\\infty');
     return t.replace(/[ \t]{2,}/g, ' ').trim();
 }
 
@@ -171,6 +177,8 @@ export function formatOutput({ resultLatex, steps, plotData, type }) {
         .map(st => ({ title: prettifyTitle(st.title || ''), latex: cleanMathLatex(st.latex || ''), kind: st.kind }))
         .filter(st => st.latex || st.title);
     list = list.filter((st, i) => i === 0 || !(norm(st.latex) === norm(list[i - 1].latex) && st.title === list[i - 1].title));
+    // 结果恰为“无定义”的中间计算步骤没有信息量（多由数值奇点产生），剔除；首步保留
+    list = list.filter((st, i) => i === 0 || !(/=\s*\\text\{无定义\}\s*$/.test(st.latex) || /^\\text\{无定义\}$/.test(st.latex)));
 
     list.forEach((st, i) => { st.kind = st.kind || inferKind(st.title, i); });
 
