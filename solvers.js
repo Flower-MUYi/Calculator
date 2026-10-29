@@ -126,10 +126,39 @@ export function tidyLatex(str) {
     // 上下标一律加花括号：x^2 → x^{2}，a_1 → a_{1}（不处理 \text{...} 内部）
     t = t.split(/(\\text\{[^{}]*\})/).map((seg, i) => i % 2 ? seg : seg
         .replace(/([\^_])(?!\{)(\\[A-Za-z]+|[A-Za-z0-9])/g, '$1{$2}')).join('');
+    // \int \left(单项\right) d → \int 单项 \, d（括号内没有顶层加减号时不需要括号）
+    t = unwrapIntegralParens(t);
+    // 独立的正数不需要括号：\left(2\right)y → 2y（函数调用 f(2) 保持不变）
+    t = t.replace(/(?<![A-Za-z}\)])\\left\((\d+(?:\.\d+)?)\\right\)/g, '$1');
     // 无效数值统一显示
     t = t.replace(/\\(?:operatorname|mathrm|text)\{\s*(?:NaN|Nothing|Undefined)\s*\}|\bNaN\b/g, '\\text{无定义}')
          .replace(/\\tilde\{?\\infty\}?|\\operatorname\{ComplexInfinity\}/g, '\\infty');
     return t.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+function unwrapIntegralParens(str) {
+    const key = '\\int \\left(';
+    let out = '', i = 0;
+    while (i < str.length) {
+        const at = str.indexOf(key, i);
+        if (at < 0) { out += str.slice(i); break; }
+        out += str.slice(i, at);
+        let j = at + key.length, depth = 1, braces = 0, top = false;
+        const start = j;
+        while (j < str.length && depth > 0) {
+            if (str.startsWith('\\left(', j)) { depth++; j += 6; continue; }
+            if (str.startsWith('\\right)', j)) { depth--; if (depth === 0) break; j += 7; continue; }
+            const ch = str[j];
+            if (ch === '{') braces++; else if (ch === '}') braces--;
+            else if ((ch === '+' || ch === '-') && braces === 0 && depth === 1 && j > start) top = true;
+            j++;
+        }
+        const inner = str.slice(start, j);
+        const after = str.slice(j + 7);
+        if (depth === 0 && !top && /^\s*d/.test(after)) { out += `\\int ${inner} \\,`; i = j + 7; }
+        else { out += key; i = at + key.length; }
+    }
+    return out;
 }
 
 /** 结果若含 π、根式、对数、分数等精确形式，附上近似小数，便于对照 */
@@ -176,7 +205,7 @@ export function formatOutput({ resultLatex, steps, plotData, type }) {
     let list = (steps || [])
         .map(st => ({ title: prettifyTitle(st.title || ''), latex: cleanMathLatex(st.latex || ''), kind: st.kind }))
         .filter(st => st.latex || st.title);
-    list = list.filter((st, i) => i === 0 || !(norm(st.latex) === norm(list[i - 1].latex) && st.title === list[i - 1].title));
+    list = list.filter((st, i) => i === 0 || norm(st.latex) !== norm(list[i - 1].latex));
     // 结果恰为“无定义”的中间计算步骤没有信息量（多由数值奇点产生），剔除；首步保留
     list = list.filter((st, i) => i === 0 || !(/=\s*\\text\{无定义\}\s*$/.test(st.latex) || /^\\text\{无定义\}$/.test(st.latex)));
 
@@ -633,23 +662,111 @@ export function differentiateNode(node, variable, ce, steps) {
 /**
  * 导数求解器导出主入口
  */
+/**
+ * 按“识别结构 → 写出法则 → 分别求导 → 代入”的顺序讲解一次求导（只展开最外层法则）
+ */
+function explainDerivative(node, v, ce, steps) {
+    const n = unwrapAST(node).expr;
+    const tex = (x) => cleanMathLatex(ce.box(x).toLatex());
+    const d = (x) => differentiateNode(x, v, ce, null).simplify().json;
+    const paren = (x) => { const t = tex(x); return /^[A-Za-z0-9\\]/.test(t) && !/[+\-]/.test(t.replace(/^-/, '')) ? t : `\\left(${t}\\right)`; };
+    const W = (x) => { const t = tex(x); const core = t.replace(/\{[^{}]*\}/g, ''); return (t.startsWith('-') || /[+\-]/.test(core)) ? `\\left(${t}\\right)` : t; };
+    const Wp = (x) => { const t = tex(x); return /^[A-Za-z0-9.]+$|^\\[a-z]+$/.test(t) ? t : `\\left(${t}\\right)`; };
+    if (!Array.isArray(n)) {
+        if (n === v) steps.push({ title: '查导数表：$(x)\' = 1$', latex: `\\frac{d}{d${v}}\\left(${v}\\right) = 1`, kind: 'method' });
+        return;
+    }
+    const [op, ...a] = n;
+
+    if (op === 'Add' || op === 'Subtract' || op === 'Negate') {
+        const terms = op === 'Negate' ? [a[0]] : a;
+        if (terms.length === 1 && op !== 'Negate') return;
+        const sepTex = op === 'Subtract' ? ' - ' : ' + ';
+        steps.push({
+            title: op === 'Negate' ? '负号可提到导数外面：$(-u)\' = -u\'$' : '应用和差法则：逐项求导，$(u \\pm w)\' = u\' \\pm w\'$',
+            latex: `\\frac{d}{d${v}}\\left[${tex(n)}\\right] = ${terms.map((t, k) => (k ? sepTex : (op === 'Negate' ? '-' : '')) + `\\left(${tex(t)}\\right)\'`).join('')}`,
+            kind: 'method'
+        });
+        steps.push({ title: '分别求出每一项的导数', latex: terms.map(t => `\\left(${tex(t)}\\right)\' = ${tex(d(t))}`).join(',\\quad ') });
+        return;
+    }
+    if (op === 'Multiply') {
+        const consts = a.filter(x => isConstant(x, v)), vars = a.filter(x => !isConstant(x, v));
+        if (consts.length && vars.length) {
+            const c = consts.length === 1 ? consts[0] : ['Multiply', ...consts], u = vars.length === 1 ? vars[0] : ['Multiply', ...vars];
+            steps.push({ title: '应用常数倍法则：常数因子可以提到导数外面，$(cu)\' = c\\,u\'$', latex: `\\frac{d}{d${v}}\\left[${tex(n)}\\right] = ${paren(c)}\\cdot\\frac{d}{d${v}}\\left[${tex(u)}\\right]`, kind: 'method' });
+            steps.push({ title: `对 ${tex(u) && '$' + tex(u) + '$'} 求导`, latex: `\\frac{d}{d${v}}\\left[${tex(u)}\\right] = ${tex(d(u))}` });
+            return;
+        }
+        const u = a[0], w = a.length === 2 ? a[1] : ['Multiply', ...a.slice(1)];
+        steps.push({ title: '识别为两个函数的乘积 $u\\cdot w$，应用乘积法则：$(uw)\' = u\'w + uw\'$', latex: `u = ${tex(u)},\\quad w = ${tex(w)}`, kind: 'method' });
+        const du = d(u), dw = d(w);
+        steps.push({ title: '分别求出 $u\'$ 与 $w\'$', latex: `u\' = ${tex(du)},\\quad w\' = ${tex(dw)}` });
+        steps.push({ title: '代入乘积法则', latex: `f\'(${v}) = ${W(du)} \\cdot ${W(w)} + ${W(u)} \\cdot ${W(dw)}` });
+        return;
+    }
+    if (op === 'Divide') {
+        const [u, w] = a;
+        if (isConstant(w, v)) { steps.push({ title: '分母是常数：按常数倍法则处理', latex: `\\frac{d}{d${v}}\\left[${tex(n)}\\right] = \\frac{1}{${tex(w)}}\\cdot\\frac{d}{d${v}}\\left[${tex(u)}\\right]`, kind: 'method' }); return; }
+        steps.push({ title: '识别为商 $\\frac{u}{w}$，应用商法则：$\\left(\\frac{u}{w}\\right)\' = \\frac{u\'w - uw\'}{w^2}$', latex: `u = ${tex(u)},\\quad w = ${tex(w)}`, kind: 'method' });
+        const du = d(u), dw = d(w);
+        steps.push({ title: '分别求出 $u\'$ 与 $w\'$', latex: `u\' = ${tex(du)},\\quad w\' = ${tex(dw)}` });
+        steps.push({ title: '代入商法则', latex: `f\'(${v}) = \\frac{${W(du)} \\cdot ${W(w)} - ${W(u)} \\cdot ${W(dw)}}{${Wp(w)}^{2}}` });
+        return;
+    }
+    if (op === 'Power' || op === 'Square' || op === 'Sqrt') {
+        const base = op === 'Sqrt' ? a[0] : a[0], ex = op === 'Square' ? 2 : (op === 'Sqrt' ? ['Rational', 1, 2] : a[1]);
+        const baseIsVar = unwrapAST(base).expr === v;
+        if (isConstant(ex, v)) {
+            if (baseIsVar) steps.push({ title: '应用幂函数求导法则：$(x^n)\' = n\\,x^{n-1}$', latex: `\\frac{d}{d${v}}\\left[${tex(n)}\\right] = ${tex(['Multiply', ex, ['Power', v, ['Subtract', ex, 1]]])}`, kind: 'method' });
+            else {
+                steps.push({ title: '外层是幂函数、内层是函数：应用链式法则，$(u^n)\' = n\\,u^{n-1}\\,u\'$', latex: `u = ${tex(base)},\\quad n = ${tex(ex)}`, kind: 'method' });
+                steps.push({ title: '求内层函数的导数', latex: `u\' = ${tex(d(base))}` });
+                steps.push({ title: '代入链式法则', latex: `f\'(${v}) = ${W(ex)}${Wp(base)}^{${tex(['Subtract', ex, 1])}} \\cdot ${W(d(base))}` });
+            }
+            return;
+        }
+        if (isConstant(base, v)) {
+            steps.push({ title: '指数函数求导：$(a^u)\' = a^u\ln a\cdot u\'$', latex: `u = ${tex(ex)},\\quad u\' = ${tex(d(ex))}`, kind: 'method' });
+            return;
+        }
+        steps.push({ title: '底数与指数都含变量：取对数 $f = e^{w\\ln u}$ 后求导', latex: `f = e^{${tex(ex)}\\ln\\left(${tex(base)}\\right)}`, kind: 'method' });
+        return;
+    }
+    if (a.length === 1) {
+        const inner = a[0];
+        const fname = { Sin: '\\sin', Cos: '\\cos', Tan: '\\tan', Exp: 'e^{x}', Ln: '\\ln', Arctan: '\\arctan', Arcsin: '\\arcsin', Arccos: '\\arccos', Sinh: '\\sinh', Cosh: '\\cosh', Tanh: '\\tanh', Abs: '|x|' }[op];
+        if (!fname) return;
+        if (unwrapAST(inner).expr === v) {
+            steps.push({ title: '查基本导数表', latex: `\\frac{d}{d${v}}\\left[${tex(n)}\\right] = ${tex(d(n))}`, kind: 'method' });
+        } else {
+            steps.push({ title: '识别为复合函数 $f(u)$，应用链式法则：$[f(u)]\' = f\'(u)\\cdot u\'$', latex: `u = ${tex(inner)}`, kind: 'method' });
+            const outerD = differentiateNode([op, 'u'], 'u', ce, null).simplify();
+            steps.push({ title: '分别求外层函数对 u 的导数，以及内层函数对 x 的导数', latex: `\\frac{d}{du}f(u) = ${tex(outerD.json)},\\quad u\' = ${tex(d(inner))}` });
+            steps.push({ title: '两者相乘，并把 u 换回原来的表达式', latex: `f\'(${v}) = ${tex(substituteVariable(outerD.json, 'u', inner))} \\cdot ${W(d(inner))}` });
+        }
+        return;
+    }
+}
+
 export function solveDerivative({ targetExpr, variable, order, conditionExpr }, ce) {
     const { expr: cleanExpr, inferredVar } = unwrapAST(targetExpr);
     const varName = variable || inferredVar || 'x';
     const numOrder = typeof order === 'number' ? Math.max(1, Math.min(order, 5)) : 1;
     const steps = [];
 
-    steps.push({
-        title: `步骤 1: 确定求导目标函数`,
-        latex: `f(${varName}) = ${cleanMathLatex(ce.box(cleanExpr).toLatex())}`
-    });
+    steps.push({ title: '确定求导目标函数', latex: `f(${varName}) = ${cleanMathLatex(ce.box(cleanExpr).toLatex())}` });
 
     let currentExpr = cleanExpr;
     for (let k = 1; k <= numOrder; k++) {
-        const deriv = differentiateNode(currentExpr, varName, ce, steps).simplify();
         const primeStr = "'".repeat(k);
+        if (numOrder > 1) {
+            steps.push({ title: k === 1 ? '先求一阶导数' : `在 ${k - 1} 阶导数的基础上再求导，得到 ${k} 阶导数`, latex: `f${primeStr}(${varName}) = \\frac{d}{d${varName}}\\left[${cleanMathLatex(ce.box(currentExpr).toLatex())}\\right]`, kind: 'method' });
+        }
+        try { explainDerivative(currentExpr, varName, ce, steps); } catch (e) { /* 讲解失败不影响结果 */ }
+        const deriv = differentiateNode(currentExpr, varName, ce, null).simplify();
         steps.push({
-            title: numOrder === 1 ? "应用求导法则与链式法则求导" : `计算 ${k} 阶导数 f^{(${k})}(${varName})`,
+            title: numOrder === 1 ? '合并同类项并整理，得到导函数' : `整理得 ${k} 阶导数`,
             latex: `f${primeStr}(${varName}) = ${cleanMathLatex(deriv.toLatex())}`
         });
         currentExpr = deriv.json;
@@ -1814,9 +1931,22 @@ export function solveIntegral({ targetExpr, variable, lower, upper, isDefinite, 
                 const v = dv.valueOf();
                 if (typeof v === 'number' && isFinite(v)) { symbolicVal = v; symbolicLatex = cleanMathLatex(dv.toLatex()); }
             } catch (e) { }
+            const substTex = (bound, boundNum) => {
+                let t = MC.astToLatex(substituteVariable(finalF.json, varName, '__B__'), { mainVar: '__B__' });
+                const b = cleanMathLatex(ce.box(bound).toLatex());
+                const bw = (boundNum < 0 || /[+\-]/.test(b.replace(/^-/, '').replace(/\{[^{}]*\}/g, ''))) ? `\\left(${b}\\right)` : b;
+                return t.replace(/(\d)__B__/g, '$1 \\cdot __B__').replace(/__B__/g, bw);
+            };
+            const wrapSum = (t) => (/[+\-]/.test(t.replace(/^-/, '').replace(/\{[^{}]*\}/g, '')) ? `\\left(${t}\\right)` : t);
             steps.push({
-                title: '应用牛顿-莱布尼茨公式代入端点求值',
-                latex: `\\left[${cleanMathLatex(finalF.toLatex())}\\right]_{${lowTex}}^{${upTex}}${symbolicLatex ? ` = ${symbolicLatex}` : ''}`
+                title: '应用牛顿-莱布尼茨公式：$\\int_a^b f(x)\\,dx = F(b) - F(a)$',
+                latex: `\\int_{${lowTex}}^{${upTex}} ${integrandLatex} \\, d${varName} = \\left[${cleanMathLatex(finalF.toLatex())}\\right]_{${lowTex}}^{${upTex}}`
+            });
+            let subLine = null;
+            try { subLine = `${wrapSum(substTex(upper, U))} - ${wrapSum(substTex(lower, L))}`; } catch (e) { }
+            steps.push({
+                title: '代入上限与下限并计算',
+                latex: `F(${upTex}) - F(${lowTex})${subLine ? ` = ${subLine}` : ''}${symbolicLatex ? ` = ${symbolicLatex}` : ''}`
             });
         } else {
             const limAt = (x) => {
@@ -2019,8 +2149,11 @@ export function solveLimit({ targetExpr, variable, targetValue, conditionExpr, d
             latex = d.exact ? d.latex : `\\approx ${d.latex}`;
             titleNote = d.exact ? '数值外推（Richardson）并识别精确值' : '数值外推得到近似值';
         }
+        if (hopital > 0 && exactTex && Math.abs(exactNum - v) <= 1e-5 * (1 + Math.abs(v))) {
+            steps.push({ title: `化简后函数连续，直接代入 ${varName} → ${pt.latex}`, latex: `\\lim_{${arrow}} ${cleanMathLatex(ce.box(curExpr).toLatex())} = ${exactTex}` });
+        }
         if (nl.left && nl.right && side === 'both') {
-            steps.push({ title: '分别计算左、右极限，两者相等', latex: `\\lim_{${varName}\\to ${pt.latex}^-} = ${MC.describeNumber(nl.left.value).latex}, \\quad \\lim_{${varName}\\to ${pt.latex}^+} = ${MC.describeNumber(nl.right.value).latex}` });
+            steps.push({ kind: 'check', title: '数值验证：左极限与右极限一致', latex: `\\lim_{${varName}\\to ${pt.latex}^-} = ${MC.describeNumber(nl.left.value).latex}, \\quad \\lim_{${varName}\\to ${pt.latex}^+} = ${MC.describeNumber(nl.right.value).latex}` });
         }
         steps.push({ title: `${titleNote}${sideNote}`, latex: `\\lim_{${arrow}} \\left(${exprLatex}\\right) = ${latex}` });
         return formatOutput({ resultLatex: withApprox(latex, v), steps, plotData: buildPlot(v, 'finite') });
@@ -2084,34 +2217,85 @@ export function solveEquation({ lhs, rhs, variable, conditionExpr }, ce) {
                 title: hasDen ? '去分母，转化为整式方程' : '移项并整理为一般形式 F(x) = 0',
                 latex: `${MC.polyLatex(numer, variable)} = 0`
             });
-            if (deg === 2) {
-                const [c, b, a] = numer;
+            const isInt = (t) => Math.abs(t - Math.round(t)) < 1e-9;
+            const par = (t) => (t < 0 ? `(${MC.fmt(t)})` : MC.fmt(t));
+            const evalPolyTex = (p, r) => p.map((c, k) => ({ c, k })).filter(t => Math.abs(t.c) > 1e-12).reverse().map((t, n) => {
+                const a2 = Math.abs(t.c);
+                const body = t.k === 0 ? MC.fmt(a2) : `${Math.abs(a2 - 1) < 1e-12 ? '' : MC.fmt(a2) + ' \\cdot '}${par(r)}${t.k > 1 ? `^{${t.k}}` : ''}`;
+                return n === 0 ? (t.c < 0 ? '-' : '') + body : (t.c < 0 ? ' - ' : ' + ') + body;
+            }).join('');
+            const linFactor = (r) => (Math.abs(r) < 1e-12 ? variable : `${variable} ${r < 0 ? '+' : '-'} ${MC.fmt(Math.abs(r))}`);
+
+            // 高次方程：先试有理根并降次
+            let cur = numer, used = 0;
+            while (MC.pDeg(cur) >= 3 && used < 4) {
+                const cand = MC.polyRoots(cur).roots.find(r => r.exact && r.im === 0);
+                if (!cand) break;
+                const r = cand.re;
+                const q = MC.pDivMod(cur, [-r, 1]).q;
+                if (Math.abs(r) < 1e-12) {
+                    steps.push({ title: `常数项为 0，可以提取公因式 $${variable}$`, latex: `${MC.polyLatex(cur, variable)} = ${variable}\\left(${MC.polyLatex(q, variable)}\\right)` });
+                } else {
+                    steps.push({
+                        title: used === 0 ? '试根：有理根的分子是常数项的因数、分母是首项系数的因数，逐个代入试探' : '对降次后的多项式继续试根',
+                        latex: `P(${MC.fmt(r)}) = ${evalPolyTex(cur, r)} = ${MC.fmt(MC.pEval(cur, r))}`
+                    });
+                    steps.push({
+                        title: `因为 $P(${MC.fmt(r)}) = 0$，所以 $(${linFactor(r)})$ 是因式，用综合除法降次`,
+                        latex: `${MC.polyLatex(cur, variable)} = \\left(${linFactor(r)}\\right)\\left(${MC.polyLatex(q, variable)}\\right)`
+                    });
+                }
+                cur = q; used++;
+            }
+
+            const pr = MC.polyRoots(numer);
+            const fac = MC.factorReal(numer);
+            const rationalAll = pr.roots.every(r => r.im === 0 && r.exact);
+
+            // 二次式：能因式分解就分解，否则用判别式与求根公式
+            if (MC.pDeg(cur) === 2 && !(deg === 2 && rationalAll)) {
+                const [c, b, a] = cur;
                 const delta = b * b - 4 * a * c;
                 steps.push({
-                    title: '计算一元二次方程判别式 \\Delta = b^2 - 4ac',
-                    latex: `\\Delta = (${MC.fmt(b)})^2 - 4(${MC.fmt(a)})(${MC.fmt(c)}) = ${MC.fmt(delta)}`
+                    title: '计算判别式 $\\Delta = b^2 - 4ac$',
+                    latex: `\\Delta = ${par(b)}^{2} - 4 \\cdot ${par(a)} \\cdot ${par(c)} = ${MC.fmt(delta)}`
                 });
-                const isInt = (t) => Math.abs(t - Math.round(t)) < 1e-9;
-                if (delta > 1e-9 && isInt(a) && isInt(b) && isInt(delta) && !isInt(Math.sqrt(delta))) {
-                    // 化简根式：Δ = k²·m
-                    let k = 1, m = Math.round(delta);
-                    for (let f = 2; f * f <= m; f++) while (m % (f * f) === 0) { m /= f * f; k *= f; }
-                    let p = -b, q = k, d = 2 * a;
-                    const g = MC.gcdInt(MC.gcdInt(p, q), d);
-                    p /= g; q /= g; d /= g;
-                    if (d < 0) { d = -d; p = -p; /* ± 号对称，无需翻转 q */ }
-                    const rad = `${q === 1 ? '' : q}\\sqrt{${m}}`;
+                if (delta > 1e-9) {
+                    steps.push({
+                        title: '$\\Delta > 0$，有两个不相等的实根，代入求根公式 $x = \\frac{-b \\pm \\sqrt{\\Delta}}{2a}$',
+                        latex: `${variable} = \\frac{-${par(b)} \\pm \\sqrt{${MC.fmt(delta)}}}{2 \\cdot ${par(a)}}`
+                    });
+                    const sq = Math.sqrt(delta);
+                    if (isInt(sq)) {
+                        const x1 = (-b + sq) / (2 * a), x2 = (-b - sq) / (2 * a);
+                        steps.push({
+                            title: '分别取 “+” 和 “−” 号，算出两个根',
+                            latex: `${variable}_{1} = \\frac{${MC.fmt(-b)} + ${MC.fmt(sq)}}{${MC.fmt(2 * a)}} = ${rootLatex(x1)}, \\quad ${variable}_{2} = \\frac{${MC.fmt(-b)} - ${MC.fmt(sq)}}{${MC.fmt(2 * a)}} = ${rootLatex(x2)}`
+                        });
+                    }
+                } else if (Math.abs(delta) <= 1e-9) {
+                    steps.push({ title: '$\\Delta = 0$，有两个相等的实根 $x = -\\frac{b}{2a}$', latex: `${variable} = -\\frac{${par(b)}}{2 \\cdot ${par(a)}} = ${rootLatex(-b / (2 * a))}` });
+                } else {
+                    steps.push({ title: '$\\Delta < 0$，没有实根（有一对共轭复根）', latex: `${variable} = \\frac{-${par(b)} \\pm \\sqrt{${MC.fmt(delta)}}}{2 \\cdot ${par(a)}}` });
+                }
+                if (deg === 2 && delta > 1e-9 && isInt(a) && isInt(b) && isInt(delta) && !isInt(Math.sqrt(delta))) {
+                    let k = 1, m2 = Math.round(delta);
+                    for (let f = 2; f * f <= m2; f++) while (m2 % (f * f) === 0) { m2 /= f * f; k *= f; }
+                    let p = -b, q2 = k, d = 2 * a;
+                    const g = MC.gcdInt(MC.gcdInt(p, q2), d);
+                    p /= g; q2 /= g; d /= g;
+                    if (d < 0) { d = -d; p = -p; }
+                    const rad = `${q2 === 1 ? '' : q2}\\sqrt{${m2}}`;
                     const numTex = p === 0 ? `\\pm ${rad}` : `${p} \\pm ${rad}`;
                     quadExact = `${variable} = ${d === 1 ? numTex : `\\frac{${numTex}}{${d}}`}`;
+                    steps.push({ title: '化简根式', latex: quadExact });
                 }
             }
-            const pr = MC.polyRoots(numer);
-            if (deg >= 2) {
-                const fac = MC.factorReal(numer);
-                steps.push({
-                    title: deg > 2 ? '尝试有理根定理，并对剩余因子数值求根，在实数域内因式分解' : '在实数域内因式分解',
-                    latex: `${MC.factorLatex(fac, variable)} = 0`
-                });
+            // 完全分解 → 乘积为零
+            if (deg >= 3 || (deg === 2 && rationalAll)) {
+                steps.push({ title: deg >= 3 ? '把多项式完全分解（实数域）' : '因式分解', latex: `${MC.factorLatex(fac, variable)} = 0` });
+                const eqs = [...fac.linear.map(f => `${linFactor(f.r)} = 0`), ...fac.quad.map(f => `${MC.polyLatex([f.q, f.p, 1], variable)} = 0 \\;(\\text{无实根})`)];
+                steps.push({ title: '乘积等于 0，则至少有一个因式等于 0', latex: eqs.join(' \\;\\text{或}\\; ') });
             }
             pr.roots.forEach(r => {
                 if (r.im === 0) {
@@ -2668,21 +2852,31 @@ export function solveODE({ lhs, rhs, conditionExpr }, ce) {
         };
         const P = tidy(ce.box(['Divide', b.json, a.json]).simplify());
         const Q = tidy(ce.box(['Negate', ['Divide', c.json, a.json]]).simplify());
-        steps.push({ title: "整理为一阶线性微分方程标准形式 y' + P(x)y = Q(x)", latex: `y' + \\left(${cleanMathLatex(P.toLatex())}\\right)y = ${cleanMathLatex(Q.toLatex())}` });
+        steps.push({ title: "整理为一阶线性微分方程的标准形式 $y' + P(x)\\,y = Q(x)$", latex: cleanMathLatex(ce.box(['Equal', ['Add', ['Prime', 'y'], ['Multiply', P.json, 'y']], Q.json]).toLatex()) + `, \\quad P(${ind}) = ${cleanMathLatex(P.toLatex())},\\; Q(${ind}) = ${cleanMathLatex(Q.toLatex())}` });
         const intP = integrateNode(P.json, ind, ce, null).simplify();
-        steps.push({ title: '计算积分因子指数 \\int P(x)\\,dx', latex: `\\int P \\, d${ind} = ${cleanMathLatex(intP.toLatex())}` });
-        steps.push({ title: '应用一阶线性常微分方程通解公式', latex: `y = e^{-\\int P dx}\\left(\\int Q\\, e^{\\int P dx}\\, dx + C\\right)` });
         const expP = ce.box(['Exp', intP.json]).simplify();
+        const mu = cleanMathLatex(expP.toLatex());
+        const muY = /[+\-]/.test(mu.replace(/^-/, '').replace(/\{[^{}]*\}/g, '')) ? `\\left(${mu}\\right)` : mu;
+        steps.push({
+            title: '求积分因子 $\\mu(x) = e^{\\int P(x)\\,dx}$',
+            latex: `\\int P(${ind})\\,d${ind} = ${cleanMathLatex(intP.toLatex())}, \\quad \\mu(${ind}) = ${mu}`,
+            kind: 'method'
+        });
         const integrand = ce.box(['Multiply', Q.json, expP.json]).simplify();
+        const integrandTex = cleanMathLatex(integrand.toLatex());
+        steps.push({ title: "方程两边同乘 $\\mu(x)$，左边恰好是 $(\\mu y)'$", latex: `\\left(${muY}\\,y\\right)' = ${integrandTex}` });
+        steps.push({ title: `两边对 ${ind} 积分`, latex: `${muY}\\,y = \\int ${integrandTex} \\, d${ind}` });
         _integrationDepth = 0;
-        const intQ = integrateNode(integrand.json, ind, ce, null).simplify();
+        const intQ = integrateNode(integrand.json, ind, ce, steps).simplify();
         if (isUnevaluatedIntegral(intQ)) {
-            steps.push({ title: '积分 \\int Q e^{\\int P} 无初等表达，通解保留积分形式', latex: `y = e^{-${cleanMathLatex(intP.toLatex())}}\\left(\\int ${cleanMathLatex(integrand.toLatex())} d${ind} + C\\right)` });
+            steps.push({ title: '右边的积分没有初等表达式，通解保留积分形式', latex: `${muY}\\,y = \\int ${integrandTex} \\, d${ind} + C` });
+        } else {
+            steps.push({ title: '右边加上积分常数 C', latex: `${muY}\\,y = ${cleanMathLatex(intQ.toLatex())} + C` });
         }
         const expNeg = ce.box(['Exp', ['Negate', intP.json]]).simplify();
         const gen = ce.box(['Multiply', expNeg.json, ['Add', intQ.json, 'C']]).simplify();
         const gl = cleanMathLatex(gen.toLatex());
-        steps.push({ title: '计算积分并整理，得微分方程通解', latex: `y(${ind}) = ${gl}` });
+        steps.push({ title: '两边同除以 $\\mu(x)$，解出 y，得通解', latex: `y(${ind}) = ${gl}` });
 
         let gfn = null;
         try { gfn = MC.compileAST(gen.json, [ind, 'C']); } catch (e) { }
