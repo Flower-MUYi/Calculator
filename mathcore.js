@@ -1169,7 +1169,35 @@ function symbolLatex(n) {
 }
 
 /** 把 MathJSON 打印成规范 LaTeX；遇到不支持的算子抛出异常，由调用方回退 */
+/** 自底向上折叠纯数值子表达式：Add(2,0) → 2，Multiply(2,3) → 6，Divide(1,2) → Rational(1,2) */
+export function foldConstants(node) {
+    const n = unwrap(node);
+    if (!Array.isArray(n)) return n;
+    const [op, ...rest] = n;
+    const a = rest.map(foldConstants);
+    const val = (x) => (typeof x === 'number' ? x : (Array.isArray(x) && x[0] === 'Rational' && typeof x[1] === 'number' && typeof x[2] === 'number' ? x[1] / x[2] : null));
+    const vs = a.map(val);
+    const pack = (r) => {
+        if (!isFinite(r)) return [op, ...a];
+        const f = toFrac(r, 5000, 1e-12);
+        if (!f) return Number.isInteger(r) ? r : [op, ...a];
+        return f.den === 1 ? f.num : ['Rational', f.num, f.den];
+    };
+    if (vs.length && vs.every(v => v !== null)) {
+        switch (op) {
+            case 'Add': return pack(vs.reduce((s, v) => s + v, 0));
+            case 'Subtract': return pack(vs[0] - vs[1]);
+            case 'Multiply': return pack(vs.reduce((s, v) => s * v, 1));
+            case 'Negate': return pack(-vs[0]);
+            case 'Divide': return vs[1] === 0 ? [op, ...a] : pack(vs[0] / vs[1]);
+            case 'Power': return Number.isInteger(vs[1]) && Math.abs(vs[1]) <= 12 && !(vs[0] === 0 && vs[1] <= 0) ? pack(Math.pow(vs[0], vs[1])) : [op, ...a];
+        }
+    }
+    return [op, ...a];
+}
+
 export function astToLatex(ast, options = {}) {
+    ast = foldConstants(ast);
     const free = [...freeSymbols(ast)];
     const mainVar = options.mainVar || (free.includes('x') ? 'x' : (free.find(s => /^[a-z]$/.test(s)) || null));
     const isVar = (n) => n === mainVar;
@@ -1257,16 +1285,26 @@ export function astToLatex(ast, options = {}) {
         (inv ? st.den : st.num).push(n);
     };
 
+    const FN_ORDER = { Exp: '0', Ln: '1', Log: '1', Lb: '1', Sqrt: '2', Abs: '2', Sin: '3', Cos: '4', Tan: '5', Cot: '6', Sec: '7', Csc: '8' };
+    const hasVar = (node) => mainVar !== null && containsSymbol(node, mainVar);
+    // 因子排序：[组, 键]。1 常量符号 → 2 变量及其幂 → 3 函数（指数、对数、三角…）→ 4 需加括号的和式
     const rank = (node) => {
         const n = unwrap(node);
         if (typeof n === 'string') return isVar(n) ? [2, n] : [1, n];
         if (Array.isArray(n)) {
-            if (n[0] === 'Power' && unwrap(n[1]) === mainVar) return [2, mainVar];
-            if (n[0] === 'Power' && typeof unwrap(n[1]) === 'string') return [typeof unwrap(n[1]) === 'string' && isVar(unwrap(n[1])) ? 2 : 1, unwrap(n[1])];
-            if (n[0] === 'Square' && typeof unwrap(n[1]) === 'string') return [isVar(unwrap(n[1])) ? 2 : 1, unwrap(n[1])];
-            if (n[0] === 'Add' || n[0] === 'Subtract') return [4, ''];
+            const op = n[0];
+            if (op === 'Power' || op === 'Square') {
+                const b = unwrap(n[1]);
+                if (op === 'Power' && hasVar(n[2])) return [3, '0'];                       // e^x、2^x 视为指数函数
+                if (typeof b === 'string') return [isVar(b) ? 2 : 1, b];
+                if (Array.isArray(b) && FN_ORDER[b[0]] !== undefined) return [3, FN_ORDER[b[0]]];
+                if (Array.isArray(b) && (b[0] === 'Add' || b[0] === 'Subtract')) return [4, ''];
+                return [3, '9'];
+            }
+            if (op === 'Add' || op === 'Subtract') return [4, ''];
+            return [3, FN_ORDER[op] !== undefined ? FN_ORDER[op] : '9' + op];
         }
-        return [3, ''];
+        return [3, '9'];
     };
 
     const joinFactors = (items) => {
@@ -1288,7 +1326,7 @@ export function astToLatex(ast, options = {}) {
     };
 
     const renderProductFactors = (list) => {
-        const sorted = list.map((n, i) => ({ n, i, r: rank(n) })).sort((a, b) => (a.r[0] - b.r[0]) || (a.r[0] <= 2 && a.r[1] !== b.r[1] ? (a.r[1] < b.r[1] ? -1 : 1) : 0) || (a.i - b.i));
+        const sorted = list.map((n, i) => ({ n, i, r: rank(n) })).sort((a, b) => (a.r[0] - b.r[0]) || (a.r[1] === b.r[1] ? 0 : (a.r[1] < b.r[1] ? -1 : 1)) || (a.i - b.i));
         return sorted.map(x => renderFactor(x.n));
     };
 
@@ -1327,18 +1365,53 @@ export function astToLatex(ast, options = {}) {
         return R(`${neg ? '-' : ''}\\frac{${nS}}{${dS}}`, neg ? 0 : 4);
     }
 
+    const PARAM = /^C\d*$/;
+    const paramOf = (node) => {
+        let found = null;
+        const walk = (x) => { const u = unwrap(x); if (typeof u === 'string' && PARAM.test(u)) found = found || u; else if (Array.isArray(u)) u.slice(1).forEach(walk); };
+        walk(node);
+        return found;
+    };
+
     function renderAdd(node) {
-        const terms = [];
-        flattenAdd(node, 1, terms);
-        const sorted = terms.map((t, i) => ({ ...t, i, d: degOf(t.node) })).sort((a, b) => (b.d - a.d) || (a.i - b.i));
+        const raw = [];
+        flattenAdd(node, 1, raw);
+
+        // 合并同类项：把每项拆成「系数 × 其余部分」，其余部分相同的项系数相加
+        const merged = [];
+        const byKey = new Map();
+        raw.forEach((t) => {
+            const st = { num: [], den: [], coefNum: 1, coefDen: 1 };
+            collectProduct(t.node, false, st);
+            const coef = (t.neg ? -1 : 1) * st.coefNum / st.coefDen;
+            const key = JSON.stringify([st.num.map(x => JSON.stringify(x)).sort(), st.den.map(x => JSON.stringify(x)).sort()]);
+            if (byKey.has(key)) { byKey.get(key).coef += coef; return; }
+            const numP = st.num.length === 0 ? 1 : (st.num.length === 1 ? st.num[0] : ['Multiply', ...st.num]);
+            const rest = st.den.length === 0 ? numP : ['Divide', numP, st.den.length === 1 ? st.den[0] : ['Multiply', ...st.den]];
+            const entry = { coef, rest, plain: t.node, plainNeg: t.neg, count: 1, i: merged.length };
+            byKey.set(key, entry); merged.push(entry);
+        });
+        const terms = merged.filter(e => Math.abs(e.coef) > 1e-12).map(e => {
+            const abs = Math.abs(e.coef);
+            const node = (Math.abs(abs - 1) < 1e-12) ? e.rest : (isInt(e.rest) && e.rest === 1 ? abs : ['Multiply', abs, e.rest]);
+            return { neg: e.coef < 0, node, i: e.i, d: degOf(e.rest), param: paramOf(e.rest) };
+        });
+        if (terms.length === 0) return R('0', 4);
+
+        // 排序：普通项按次数降序（同次数正项在前）；含任意常数 C₁、C₂ 的项放最后，并按下标升序
+        terms.sort((a, b) => {
+            if (!!a.param !== !!b.param) return a.param ? 1 : -1;
+            if (a.param && b.param && a.param !== b.param) return a.param < b.param ? -1 : 1;
+            return (b.d - a.d) || ((a.neg ? 1 : 0) - (b.neg ? 1 : 0)) || (a.i - b.i);
+        });
         let s = '';
-        sorted.forEach((t, i) => {
+        terms.forEach((t, i) => {
             const body = render(t.node);
             const txt = body.p < 1 ? wrap(body, 1) : body.s;
             if (i === 0) s = (t.neg ? '-' : '') + txt;
             else s += (t.neg ? ' - ' : ' + ') + txt;
         });
-        return R(s, sorted.length === 1 && !sorted[0].neg ? render(sorted[0].node).p : 0);
+        return R(s, terms.length === 1 && !terms[0].neg ? render(terms[0].node).p : 0);
     }
 
     function argOf(u, fnLatex) {
@@ -1394,7 +1467,15 @@ export function astToLatex(ast, options = {}) {
             case 'Log': return a.length === 1 ? argOf(a[0], '\\log') : argOf(a[0], `\\log_{${render(a[1]).s}}`);
             case 'Integrate': return R(`\\int ${render(a[0]).s} \\, d${a[1] ? render(a[1]).s : 'x'}`, 0);
             case 'Delimiter': return render(a[0]);
+            case 'Prime': { const k = typeof a[1] === 'number' ? a[1] : 1; const b = unwrap(a[0]); const base = Array.isArray(b) && typeof b[0] === 'string' && /^[a-z]$/.test(b[0]) ? b[0] : render(b).s; return R(`${base}${"'".repeat(Math.min(k, 4))}`, 4); }
+            case 'D': case 'Derivative': return R(`\\frac{d}{d${a[1] ? render(a[1]).s : 'x'}}\\left(${render(a[0]).s}\\right)`, 4);
+            case 'Equal': return R(`${render(a[0]).s} = ${render(a[1]).s}`, -1);
+            case 'Less': return R(`${render(a[0]).s} < ${render(a[1]).s}`, -1);
+            case 'LessEqual': return R(`${render(a[0]).s} \\le ${render(a[1]).s}`, -1);
+            case 'Greater': return R(`${render(a[0]).s} > ${render(a[1]).s}`, -1);
+            case 'GreaterEqual': return R(`${render(a[0]).s} \\ge ${render(a[1]).s}`, -1);
             default:
+                if (typeof op === 'string' && /^[a-z]$/.test(op)) return R(`${op}\\left(${a.map(x => render(x).s).join(', ')}\\right)`, 4);
                 if (FN_NAMES[op] && a.length === 1) return argOf(a[0], FN_NAMES[op]);
                 throw new Error('unsupported:' + op);
         }
