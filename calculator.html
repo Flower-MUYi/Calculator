@@ -161,7 +161,7 @@
         #graph-legend .katex { font-size: 1.05em; color: #f8fafc; }
         #graph-tooltip .katex { font-size: 1.15em; color: #38bdf8; }
         #graph-tooltip .katex-html, #graph-legend .katex-html { white-space: nowrap; }
-        #graphContainer .graph-wrapper { height: min(60vh, 520px) !important; min-height: 340px; border-radius: 4px !important; border-color: #1e293b !important; }
+        #graphContainer { --gr-h: min(62vh, 540px); }
 
         /* ---------- 调试 ---------- */
         details.debug { margin-top: 4px; border: 1px dashed var(--rule); border-radius: 4px; background: rgba(251, 252, 250, .7); }
@@ -241,7 +241,7 @@
                 <div class="sheet">
                     <div class="stage-head">
                         <h2 id="graphTitle">函数图像</h2>
-                        <span class="hint">拖动平移，滚轮缩放；点图例可隐藏曲线</span>
+                        <span class="hint">拖动平移，滚轮缩放，双击适应；点图例可隐藏曲线</span>
                     </div>
                     <div id="graphContainer"></div>
                 </div>
@@ -388,7 +388,6 @@
             });
 
             grapher.setData(output.plotData || null);
-            if (output.plotData && output.plotData.points && output.plotData.points.length) grapher.autoFit();
         }
 
         // 取当前公式的 MathJSON：依次尝试 expression.json、getValue('math-json')、用 CE 解析 LaTeX
