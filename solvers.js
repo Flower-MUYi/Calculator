@@ -2070,10 +2070,10 @@ export function solveLimit({ targetExpr, variable, targetValue, conditionExpr, d
             if (isFinite(pt.num)) {
                 points.push({ x: pt.num, y: value, layerId: 'f', label: `极限值 L = ${MC.fmt(value)}`, name: '极限值', latex: `L = ${MC.fmt(value)}`, style: 'hollow', color: '#ef4444' });
             } else {
-                layers.push({ id: 'asym', label: `水平渐近线 y = ${MC.fmt(value)}`, name: '水平渐近线', latex: `y = ${MC.fmt(value)}`, color: '#ef4444', dash: [6, 5], visible: true, fn: () => value });
+                layers.push({ id: 'asym', label: `水平渐近线 y = ${MC.fmt(value)}`, name: '水平渐近线', latex: `y = ${MC.fmt(value)}`, color: '#f87171', hline: value, guide: true, visible: true, fn: () => NaN });
             }
         } else if (kind === 'inf' && isFinite(pt.num)) {
-            layers.push({ id: 'vasym', label: `竖直渐近线 ${varName} = ${MC.fmt(pt.num)}`, name: '竖直渐近线', latex: `${varName} = ${MC.fmt(pt.num)}`, color: '#ef4444', dash: [6, 5], visible: false, fn: () => NaN });
+            layers.push({ id: 'vasym', label: `竖直渐近线 ${varName} = ${MC.fmt(pt.num)}`, name: '竖直渐近线', latex: `${varName} = ${MC.fmt(pt.num)}`, color: '#f87171', vline: pt.num, guide: true, visible: true, fn: () => NaN });
         }
         return { layers, points };
     };
@@ -2430,7 +2430,8 @@ export function solveInequality({ lhs, rhs, rel }, ce) {
     const plotData = {
         layers: [
             { id: 'F', label: 'F(x)', name: 'F(x) = 左 − 右', latex: `F(${v}) = ${cleanMathLatex(ce.box(['Subtract', cL, cR]).toLatex())}`, color: '#38bdf8', visible: true, fn: FIN },
-            { id: 'zero', label: 'y = 0', name: '零线', latex: 'y = 0', color: '#94a3b8', dash: [3, 5], visible: true, fn: () => 0 }
+            { id: 'zero', label: 'y = 0', name: '零线', latex: 'y = 0', color: '#94a3b8', dash: [3, 5], visible: true, guide: true, fn: () => 0 },
+            ...poles.slice(0, 4).map((p, k) => ({ id: `pole${k}`, label: `x = ${rootLatex(p)}`, name: '不可取点', latex: `${v} = ${rootLatex(p)}`, color: '#f87171', vline: p, guide: true, visible: true, fn: () => NaN }))
         ],
         areas: segs.filter(s => !s.point).map(s => ({
             layerId: 'F', from: Math.max(s.l, -60), to: Math.min(s.r, 60), topFn: (x) => Math.max(-30, Math.min(30, F(x) || 0)), bottomFn: () => 0, color: 'rgba(34,197,94,0.22)'
@@ -2667,8 +2668,13 @@ export function solveFunctionDeclaration({ name, expr, conditionExpr }, ce) {
     if (nInf.kind === 'finite') asym.push(`y = ${rootLatex(nInf.value)} \\; (${v}\\to-\\infty)`);
     if (asym.length) steps.push({ title: '考察无穷远处行为，得水平渐近线', latex: asym.join(', \\quad ') });
 
+    const guideLayers = [
+        ...scan.poles.slice(0, 4).map((p, k) => ({ id: `va${k}`, label: `x = ${rootLatex(p)}`, name: '竖直渐近线', latex: `${v} = ${rootLatex(p)}`, color: '#f87171', vline: p, guide: true, visible: true, fn: () => NaN })),
+        ...(pInf.kind === 'finite' ? [{ id: 'ha1', label: 'y', name: '水平渐近线', latex: `y = ${rootLatex(pInf.value)}`, color: '#fbbf24', hline: pInf.value, guide: true, visible: true, fn: () => NaN }] : []),
+        ...(nInf.kind === 'finite' && !(pInf.kind === 'finite' && Math.abs(pInf.value - nInf.value) < 1e-6) ? [{ id: 'ha2', label: 'y', name: '水平渐近线', latex: `y = ${rootLatex(nInf.value)}`, color: '#fbbf24', hline: nInf.value, guide: true, visible: true, fn: () => NaN }] : [])
+    ];
     const plotData = {
-        layers: [{ id: 'f', label: `f(${v}) = ${exprLatex}`, name: `函数 f(${v})`, latex: `f(${v}) = ${exprLatex}`, color: '#38bdf8', visible: true, fn }],
+        layers: [{ id: 'f', label: `f(${v}) = ${exprLatex}`, name: `函数 f(${v})`, latex: `f(${v}) = ${exprLatex}`, color: '#38bdf8', visible: true, fn }, ...guideLayers],
         points: points.filter(p => isFinite(p.y))
     };
     return formatOutput({ resultLatex: `y = ${exprLatex}`, steps, plotData });
